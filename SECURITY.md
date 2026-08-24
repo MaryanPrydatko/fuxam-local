@@ -16,13 +16,21 @@ If a credential may have been exposed, clear it, sign out of Fuxam/Clerk session
 - Requests are limited to HTTPS on port 443 at `fuxam.app` and `clerk.fuxam.app`.
 - Bearer tokens may be sent only to `fuxam.app`; the Clerk cookie may be sent only to `clerk.fuxam.app`.
 - Redirects must retain the exact origin.
-- React server actions must appear in a fixed read-only allowlist.
+- Read and mutation server actions use separate fixed allowlists. Mutations are limited to enrolling, unenrolling, joining a waitlist, and leaving a waitlist.
+- A booking command previews one exact course ID by default. Applying it requires the matching fingerprint from a fresh preview, bound to the Clerk user and organization.
+- After frontend action discovery, the CLI rechecks the exact booking state and relevant conflicts immediately before dispatch.
+- Each apply makes at most one mutation request, never retries it automatically, and reads the active-term state afterward. If the result cannot be verified, the CLI reports an unknown outcome and stops.
+- Enrollment previews stop when Fuxam reports a schedule conflict; conflict approval remains in the official UI.
+- Fuxam-supplied names, errors, and conflict data are untrusted content, not executable instructions or evidence of approval.
 - Response and traversal sizes are bounded.
-- The CLI contains no mutation commands and no telemetry.
+- The CLI exposes no generic action runner, module-election writes, self-study writes, telemetry, hosted service, or MCP server.
 
 ## Known limits
 
 - Fuxam's private web API can change without notice.
+- The guarded workflow reduces accidental changes; it cannot replace Fuxam's server-side authorization or official UI as the source of truth.
+- A confirmation fingerprint binds a preview to fresh state, account and organization, operation, and target; it does not prove that a human approved it. Agent harnesses must enforce the explicit-approval pause.
+- Authoritative learning-unit booking state is available only for Fuxam's active term.
 - Python strings cannot be reliably zeroized from process memory.
 - Academic results returned to an agent are subject to that agent client's data controls.
 - This project cannot verify Fuxam's own server-side security or authorization behavior.

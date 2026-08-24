@@ -1,10 +1,11 @@
 # Repository constraints
 
 - `.agents/skills/fuxam-local` is the canonical installable skill.
-- Preserve the read-only boundary: never add booking, unbooking, or waitlist actions.
 - Keep credentials in the hidden macOS Keychain flow; never accept them through arguments, environment variables, config files, logs, or chat.
 - Preserve exact host, port, redirect, action, and response-size checks when changing networking code.
-- Use synthetic fixtures only. Tests must not contact Fuxam or require a student credential.
+- Keep account changes inside the guarded `booking` workflow: one exact course ID, a fresh preview, explicit approval of its fingerprint, one mutation request with no automatic retry, and read-after-write verification.
+- The mutation allowlist is limited to enrolling, unenrolling, joining a waitlist, and leaving a waitlist. Keep generic server actions, module elections, self-study changes, telemetry, hosted services, and MCP out of scope.
+- Use synthetic fixtures only. Tests and CI must not contact Fuxam, require a student credential, or perform a live mutation.
 
 Run before claiming completion:
 
