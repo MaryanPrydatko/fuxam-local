@@ -15,10 +15,17 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / ".agents" / "skills" / "fuxam-local"
 CANONICAL_RELATIVE = pathlib.Path(".agents/skills/fuxam-local")
+BACKUP_RELATIVE = pathlib.Path(".agents/backups/fuxam-local")
 ALIAS_RELATIVES = (
     pathlib.Path(".claude/skills/fuxam-local"),
     pathlib.Path(".codex/skills/fuxam-local"),
 )
+LEGACY_SKILL_ROOTS = (
+    pathlib.Path(".agents/skills"),
+    pathlib.Path(".claude/skills"),
+    pathlib.Path(".codex/skills"),
+)
+LEGACY_BACKUP_PREFIX = f"{CANONICAL_RELATIVE.name}.backup-"
 
 
 class InstallError(RuntimeError):
@@ -35,13 +42,43 @@ def points_to(path: pathlib.Path, target: pathlib.Path) -> bool:
     )
 
 
-def next_backup_path(path: pathlib.Path) -> pathlib.Path:
+def next_backup_path(home: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base = path.with_name(f"{path.name}.backup-{timestamp}")
+    relative = path.relative_to(home)
+    source = "-".join(part.removeprefix(".") for part in relative.parts)
+    base = home / BACKUP_RELATIVE / f"{source}.backup-{timestamp}"
     candidate = base
     counter = 1
     while path_exists(candidate):
-        candidate = path.with_name(f"{base.name}-{counter}")
+        candidate = base.with_name(f"{base.name}-{counter}")
+        counter += 1
+    return candidate
+
+
+def legacy_backup_paths(home: pathlib.Path) -> list[pathlib.Path]:
+    backups: list[pathlib.Path] = []
+    for relative in LEGACY_SKILL_ROOTS:
+        root = home / relative
+        if not root.is_dir():
+            continue
+        backups.extend(
+            sorted(
+                path
+                for path in root.iterdir()
+                if path.name.startswith(LEGACY_BACKUP_PREFIX) and path_exists(path)
+            )
+        )
+    return backups
+
+
+def next_legacy_backup_path(home: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
+    relative = path.relative_to(home)
+    source = "-".join(part.removeprefix(".") for part in relative.parts)
+    base = home / BACKUP_RELATIVE / source
+    candidate = base
+    counter = 1
+    while path_exists(candidate):
+        candidate = base.with_name(f"{base.name}-{counter}")
         counter += 1
     return candidate
 
@@ -70,8 +107,10 @@ def install(
         for alias in alias_paths
         if path_exists(alias) and not points_to(alias, canonical)
     )
-    if conflicts and not replace:
-        paths = ", ".join(str(path) for path in conflicts)
+    legacy_backups = legacy_backup_paths(home)
+    paths_to_preserve = [*conflicts, *legacy_backups]
+    if paths_to_preserve and not replace:
+        paths = ", ".join(str(path) for path in paths_to_preserve)
         raise InstallError(
             f"Refused to overwrite existing paths: {paths}. "
             "Re-run with --replace to preserve them as timestamped backups."
@@ -83,6 +122,8 @@ def install(
         "canonical": str(canonical),
         "aliases": [str(path) for path in alias_paths],
         "replaced": [str(path) for path in conflicts],
+        "legacyBackups": [str(path) for path in legacy_backups],
+        "migratedLegacyBackups": [],
         "backups": [],
     }
     if dry_run:
@@ -107,9 +148,18 @@ def install(
             )
 
         for conflict in conflicts:
-            backup = next_backup_path(conflict)
+            backup = next_backup_path(home, conflict)
+            backup.parent.mkdir(parents=True, exist_ok=True)
             conflict.rename(backup)
             backups.append((conflict, backup))
+
+        migrated_legacy_backups: list[pathlib.Path] = []
+        for legacy_backup in legacy_backups:
+            backup = next_legacy_backup_path(home, legacy_backup)
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            legacy_backup.rename(backup)
+            backups.append((legacy_backup, backup))
+            migrated_legacy_backups.append(backup)
 
         if staged_skill is not None:
             staged_skill.rename(canonical)
@@ -139,6 +189,9 @@ def install(
         ) from exc
 
     report["backups"] = [str(backup) for _, backup in backups]
+    report["migratedLegacyBackups"] = [
+        str(backup) for backup in migrated_legacy_backups
+    ]
     return report
 
 
