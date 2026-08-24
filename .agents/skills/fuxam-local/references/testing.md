@@ -16,7 +16,7 @@ Use the script relative to this skill directory. Never put a real credential in 
    python3 "<skill-root>/scripts/fuxam.py" smoke-test
    ```
 
-4. Verify the dynamically resolved frontend action too. This deeper check may take longer:
+4. Verify the active-term page and dynamically resolved read action too. This deeper check may take longer:
 
    ```sh
    python3 "<skill-root>/scripts/fuxam.py" smoke-test --deep
@@ -24,4 +24,6 @@ Use the script relative to this skill directory. Never put a real credential in 
 
 The report contains only pass/fail status and response shapes. A passing test proves current compatibility for that account and moment; it cannot guarantee that Fuxam's private API will never change.
 
-Repository maintainers should also run the credential-free offline suite documented in the repository README. Never run authenticated live checks in CI.
+For a user-requested live workflow check, `learning-units --format table` is read-only. A `booking <operation> <course-id>` command without `--apply` may verify preview behavior for one eligible exact course ID; stop after confirming `mode: preview` and `changed: false`.
+
+Repository maintainers should also run the credential-free offline suite documented in the repository README. Never run authenticated checks in CI, and never pass `--apply` while testing.

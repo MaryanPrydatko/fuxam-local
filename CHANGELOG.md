@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 — 2026-08-25
+
+- Added authoritative active-term learning-unit enrollment, waitlist, self-study, and availability data from Fuxam's My Learning Units page.
+- Changed `enrolled --term` to report confirmed current-term enrollments instead of offering-tag overlaps.
+- Added guarded preview-and-confirm commands for enrolling, unenrolling, joining a waitlist, and leaving a waitlist.
+- Bound each change to one exact course, Clerk context, and a final fresh-state check; disabled mutation retries and added read-after-write verification.
+
 ## 0.3.2 — 2026-08-24
 
 - Moved installer backups outside skill-discovery directories so old copies cannot appear as duplicate skills.

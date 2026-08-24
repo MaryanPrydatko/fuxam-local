@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only local CLI for a CODE University student's Fuxam account."""
+"""Private local CLI for a CODE University student's Fuxam account."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import argparse
 import base64
 import ctypes
 import getpass
+import hashlib
+import hmac
+import http.client
 import json
 import re
 import sys
@@ -15,12 +18,14 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from html.parser import HTMLParser
 from typing import Any
 
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
@@ -38,10 +43,41 @@ READ_ONLY_ACTIONS = frozenset(
         "getModuleInfo",
     }
 )
+MUTATION_ACTIONS = frozenset(
+    {
+        "bookCoursesAction",
+        "unbookCourseAction",
+        "joinWaitlistAction",
+        "leaveWaitlistAction",
+    }
+)
+BOOKING_ACTIONS: dict[str, tuple[str, str]] = {
+    "enroll": ("bookCoursesAction", "ENROLLED"),
+    "unenroll": ("unbookCourseAction", "NOT_ENROLLED"),
+    "join-waitlist": ("joinWaitlistAction", "WAITLISTED"),
+    "leave-waitlist": ("leaveWaitlistAction", "NOT_WAITLISTED"),
+}
+TERM_CATEGORY_STATES = {
+    "myCourses": "ENROLLED",
+    "waitlist": "WAITLISTED",
+    "selfStudy": "SELF_STUDY",
+}
+MAX_COURSE_ID_BYTES = 200
 
 
 class FuxamError(RuntimeError):
     pass
+
+
+class MutationOutcomeUnknown(FuxamError):
+    """A mutation may have reached Fuxam; callers must reconcile by reading."""
+
+    def __init__(self) -> None:
+        super().__init__("The Fuxam mutation outcome is unknown.")
+
+
+class MutationPreconditionChanged(FuxamError):
+    """A preview-bound account or build changed before the mutation request."""
 
 
 def doctor_status() -> dict[str, Any]:
@@ -77,7 +113,7 @@ def doctor_status() -> dict[str, Any]:
             "tested": False,
             "allowedOrigins": [BASE_URL, CLERK_URL],
         },
-        "access": "read-only",
+        "access": "read with guarded booking writes",
         "telemetry": False,
     }
     if keychain_failed:
@@ -139,16 +175,23 @@ def smoke_test(client: FuxamClient, *, deep: bool = False) -> dict[str, Any]:
         ),
     ]
     if deep:
-        checks.append(
-            (
-                "bookable-server-action",
-                lambda: client.bookable("", 1, 1),
-                lambda value: validate_smoke_response(
-                    value,
-                    require_object=True,
-                    any_field=("courses", "learningUnits", "pageCount"),
+        checks.extend(
+            [
+                (
+                    "active-term-bookings",
+                    client.term_courses,
+                    lambda value: (summarize_term_courses(value) and "object"),
                 ),
-            )
+                (
+                    "bookable-server-action",
+                    lambda: client.bookable("", 1, 1),
+                    lambda value: validate_smoke_response(
+                        value,
+                        require_object=True,
+                        any_field=("courses", "learningUnits", "pageCount"),
+                    ),
+                ),
+            ]
         )
 
     reports: list[dict[str, Any]] = []
@@ -413,7 +456,7 @@ def summarize_enrolled(value: Any, term: str | None = None) -> dict[str, Any]:
     courses = response.get("courses")
     if not isinstance(courses, list):
         raise FuxamError("Fuxam returned unsupported enrolled-course data.")
-    target = canonical_term(term) if term else None
+    target = canonical_term(term) if term is not None else None
     learning_units: list[dict[str, Any]] = []
     schema_issues = 0
     for course in courses:
@@ -532,6 +575,178 @@ def summarize_enrolled(value: Any, term: str | None = None) -> dict[str, Any]:
     }
 
 
+def _exact_optional_int(
+    value: Any, label: str, *, positive: bool = False
+) -> int | None:
+    if value is None:
+        return None
+    minimum = 1 if positive else 0
+    if type(value) is not int or value < minimum:
+        raise FuxamError(f"Fuxam returned unsupported {label} data.")
+    return value
+
+
+def summarize_term_courses(
+    value: Any, requested_term: str | None = None
+) -> dict[str, Any]:
+    """Project Fuxam's current-term page into authoritative booking states."""
+    response = as_object(value, "current-term booking")
+    active_term = as_object(response.get("activeTerm"), "active term")
+    term_id = active_term.get("id")
+    term_name = active_term.get("name")
+    if not isinstance(term_id, str) or not term_id:
+        raise FuxamError("Fuxam returned no active term ID.")
+    if not isinstance(term_name, str) or not term_name:
+        raise FuxamError("Fuxam returned no active term name.")
+    active_code = canonical_term(term_name)
+    if requested_term is not None and canonical_term(requested_term) != active_code:
+        raise FuxamError(
+            f"TERM_NOT_ACTIVE: Fuxam exposes live booking state for {active_code}, "
+            f"not {canonical_term(requested_term)}."
+        )
+    can_book = response.get("canBookCourses")
+    waitlist_enabled = response.get("waitlistEnabled")
+    if type(can_book) is not bool or type(waitlist_enabled) is not bool:
+        raise FuxamError("Fuxam returned unsupported booking-policy data.")
+    categories = as_object(response.get("coursesByCategory"), "course categories")
+    expected_categories = ("myCourses", "waitlist", "selfStudy", "bookable")
+    if any(not isinstance(categories.get(name), list) for name in expected_categories):
+        raise FuxamError("Fuxam returned unsupported current-term course categories.")
+    if set(categories) != set(expected_categories):
+        raise FuxamError("Fuxam returned changed current-term course categories.")
+
+    units: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    counts = {
+        "enrolled": 0,
+        "waitlisted": 0,
+        "selfStudy": 0,
+        "bookable": 0,
+        "full": 0,
+    }
+    for category in expected_categories:
+        for raw_course in categories[category]:
+            course = as_object(raw_course, "current-term course")
+            course_id = course.get("id")
+            name = course.get("name")
+            if not isinstance(course_id, str) or not course_id:
+                raise FuxamError("Fuxam returned a course without an ID.")
+            if course_id in seen_ids:
+                raise FuxamError("Fuxam returned a duplicate current-term course ID.")
+            seen_ids.add(course_id)
+            if not isinstance(name, str) or not name:
+                raise FuxamError("Fuxam returned a course without a name.")
+            if (
+                type(course.get("isEnrolled")) is not bool
+                or type(course.get("isSelfStudy")) is not bool
+            ):
+                raise FuxamError("Fuxam returned unsupported course-state data.")
+            booking = as_object(course.get("booking"), "course booking")
+            is_full = booking.get("isFull")
+            can_unbook = booking.get("canUnbook")
+            if type(is_full) is not bool or type(can_unbook) is not bool:
+                raise FuxamError("Fuxam returned unsupported course-booking flags.")
+            waitlist_position = _exact_optional_int(
+                booking.get("waitlistPosition"),
+                "waitlist position",
+                positive=True,
+            )
+            capacity = _exact_optional_int(booking.get("capacity"), "course capacity")
+            enrolled_count = _exact_optional_int(
+                booking.get("enrolledCount"), "enrolled count"
+            )
+            if category == "bookable":
+                state = "FULL" if is_full else "BOOKABLE"
+            else:
+                state = TERM_CATEGORY_STATES[category]
+            is_enrolled = course["isEnrolled"]
+            is_self_study = course["isSelfStudy"]
+            if category == "myCourses" and not is_enrolled:
+                raise FuxamError("Fuxam returned an inconsistent enrolled course.")
+            if category in {"waitlist", "bookable"} and (is_enrolled or is_self_study):
+                raise FuxamError("Fuxam returned an inconsistent booking category.")
+            if category == "selfStudy" and not is_self_study:
+                raise FuxamError("Fuxam returned an inconsistent self-study course.")
+            if state == "WAITLISTED" and waitlist_position is None:
+                raise FuxamError("Fuxam returned a waitlist entry without a position.")
+            if state != "WAITLISTED" and waitlist_position is not None:
+                raise FuxamError("Fuxam returned an unexpected waitlist position.")
+            count_key = {
+                "ENROLLED": "enrolled",
+                "WAITLISTED": "waitlisted",
+                "SELF_STUDY": "selfStudy",
+                "BOOKABLE": "bookable",
+                "FULL": "full",
+            }[state]
+            counts[count_key] += 1
+            layer_id = course.get("layerId")
+            if layer_id is not None and not isinstance(layer_id, str):
+                raise FuxamError("Fuxam returned unsupported course layer data.")
+            enrollment_origin = booking.get("enrollmentOrigin")
+            if enrollment_origin is not None and not isinstance(enrollment_origin, str):
+                raise FuxamError("Fuxam returned unsupported enrollment-origin data.")
+            units.append(
+                {
+                    "courseId": course_id,
+                    "layerId": layer_id,
+                    "name": name,
+                    "state": state,
+                    "category": category,
+                    "capacity": capacity,
+                    "enrolledCount": enrolled_count,
+                    "isFull": is_full,
+                    "canUnenroll": can_unbook,
+                    "waitlistPosition": waitlist_position,
+                    "enrollmentOrigin": enrollment_origin,
+                }
+            )
+    state_order = {
+        "ENROLLED": 0,
+        "WAITLISTED": 1,
+        "SELF_STUDY": 2,
+        "BOOKABLE": 3,
+        "FULL": 4,
+    }
+    units.sort(key=lambda item: (state_order[item["state"]], item["name"].casefold()))
+    return {
+        "kind": "active-term-learning-unit-bookings",
+        "term": active_code,
+        "termId": term_id,
+        "termName": term_name,
+        "total": len(units),
+        "counts": counts,
+        "canBookCourses": can_book,
+        "waitlistEnabled": waitlist_enabled,
+        "learningUnits": units,
+        "complete": True,
+        "warnings": [],
+        "evidence": "Fuxam My Learning Units active-term booking categories",
+    }
+
+
+def summarize_term_enrolled(
+    value: Any, requested_term: str | None = None
+) -> dict[str, Any]:
+    """Return only confirmed enrollments, keeping waitlist entries separate."""
+    summary = summarize_term_courses(value, requested_term)
+    enrolled = [
+        item for item in summary["learningUnits"] if item["state"] == "ENROLLED"
+    ]
+    waitlisted = [
+        item for item in summary["learningUnits"] if item["state"] == "WAITLISTED"
+    ]
+    return {
+        **summary,
+        "kind": "active-term-learning-unit-enrollments",
+        "total": len(enrolled),
+        "learningUnits": enrolled,
+        "waitlistedTotal": len(waitlisted),
+        "waitlistedLearningUnits": waitlisted,
+        "confirmedClaims": [f"listed learning units are enrolled in {summary['term']}"],
+        "unconfirmedClaims": ["completion status", "still needed"],
+    }
+
+
 def _study_item_terms(
     item: dict[str, Any], term_names_by_id: dict[str, str]
 ) -> tuple[list[str], bool, bool]:
@@ -580,7 +795,7 @@ def _study_item_terms(
 def summarize_modules(value: Any, term: str | None = None) -> dict[str, Any]:
     """Return formal study-plan elections, optionally narrowed to one term."""
     response = as_object(value, "study plan")
-    target = canonical_term(term) if term else None
+    target = canonical_term(term) if term is not None else None
     term_names_by_id: dict[str, str] = {}
     available_terms: list[str] = []
     schema_issues = 0
@@ -738,6 +953,49 @@ def _append_warnings(output: str, result: dict[str, Any]) -> str:
 
 def render_terminal_result(command: str, result: dict[str, Any]) -> str:
     term = result.get("term") or "all terms"
+    if command in {"enrolled", "learning-units"} and result.get("kind") in {
+        "active-term-learning-unit-enrollments",
+        "active-term-learning-unit-bookings",
+    }:
+        units = result.get("learningUnits", [])
+
+        def rows(values: list[dict[str, Any]]) -> list[list[Any]]:
+            return [
+                [
+                    item.get("state"),
+                    item.get("name"),
+                    item.get("courseId"),
+                    (
+                        f"{item.get('enrolledCount')}/{item.get('capacity')}"
+                        if item.get("capacity") is not None
+                        and item.get("enrolledCount") is not None
+                        else None
+                    ),
+                    item.get("waitlistPosition"),
+                ]
+                for item in values
+            ]
+
+        heading = (
+            f"Confirmed enrollments for {term}:"
+            if result["kind"] == "active-term-learning-unit-enrollments"
+            else f"Active-term learning units for {term}:"
+        )
+        output = heading
+        if units:
+            output += "\n\n" + _render_table(
+                ["State", "Learning unit", "Course ID", "Seats", "Waitlist"],
+                rows(units),
+            )
+        else:
+            output += "\n\nNone."
+        waitlisted = result.get("waitlistedLearningUnits", [])
+        if result["kind"] == "active-term-learning-unit-enrollments" and waitlisted:
+            output += "\n\nWaitlisted (not enrolled):\n\n" + _render_table(
+                ["State", "Learning unit", "Course ID", "Seats", "Waitlist"],
+                rows(waitlisted),
+            )
+        return _append_warnings(output, result)
     if command == "enrolled":
         units = result.get("learningUnits", [])
         if not units:
@@ -891,14 +1149,177 @@ def parse_flight(body: bytes) -> Any:
     return resolve(value)
 
 
+class _FlightScriptParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._in_script = False
+        self._chunks: list[str] = []
+        self.scripts: list[str] = []
+
+    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() == "script":
+            self._in_script = True
+            self._chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_script:
+            self._chunks.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() == "script" and self._in_script:
+            self.scripts.append("".join(self._chunks))
+            self._in_script = False
+            self._chunks = []
+
+
+def _find_term_payloads(value: Any) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    stack = [value]
+    visited = 0
+    while stack:
+        item = stack.pop()
+        visited += 1
+        if visited > 200_000:
+            raise FuxamError("Fuxam returned unexpectedly complex term data.")
+        if isinstance(item, dict):
+            if "coursesByCategory" in item:
+                matches.append(item)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return matches
+
+
+def parse_term_page(body: bytes) -> dict[str, Any]:
+    """Extract exactly one current-term booking payload from a Next.js page."""
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise FuxamError("Fuxam returned an unexpectedly large term page.")
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FuxamError("Fuxam returned malformed term page data.") from exc
+    parser = _FlightScriptParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception as exc:
+        raise FuxamError("Fuxam returned malformed term page data.") from exc
+
+    if len(parser.scripts) > 10_000:
+        raise FuxamError("Fuxam returned unexpectedly complex term page data.")
+    flight_chunks: list[str] = []
+    push_marker = "self.__next_f.push("
+    decoder = json.JSONDecoder()
+    push_count = 0
+    for script in parser.scripts:
+        cursor = 0
+        while cursor < len(script) and script[cursor].isspace():
+            cursor += 1
+        if not script.startswith(push_marker, cursor):
+            continue
+        while True:
+            value_start = cursor + len(push_marker)
+            while value_start < len(script) and script[value_start].isspace():
+                value_start += 1
+            try:
+                push, value_end = decoder.raw_decode(script, value_start)
+            except json.JSONDecodeError as exc:
+                raise FuxamError("Fuxam returned malformed term page data.") from exc
+            while value_end < len(script) and script[value_end].isspace():
+                value_end += 1
+            if value_end >= len(script) or script[value_end] != ")":
+                raise FuxamError("Fuxam returned malformed term page data.")
+            cursor = value_end + 1
+            push_count += 1
+            if push_count > 10_000:
+                raise FuxamError("Fuxam returned unexpectedly complex term page data.")
+            if not isinstance(push, list) or not push:
+                raise FuxamError("Fuxam returned malformed term page data.")
+            if type(push[0]) is not int or push[0] != 1:
+                pass
+            elif len(push) != 2 or not isinstance(push[1], str):
+                raise FuxamError("Fuxam returned malformed term page data.")
+            else:
+                flight_chunks.append(push[1])
+            while cursor < len(script) and script[cursor].isspace():
+                cursor += 1
+            if cursor < len(script) and script[cursor] == ";":
+                cursor += 1
+                while cursor < len(script) and script[cursor].isspace():
+                    cursor += 1
+            if cursor == len(script):
+                break
+            if not script.startswith(push_marker, cursor):
+                raise FuxamError("Fuxam returned malformed term page data.")
+
+    stream = "".join(flight_chunks).encode("utf-8")
+    matches: list[dict[str, Any]] = []
+    offset = 0
+    # Next page streams include empty-ID control lines; unlike action responses,
+    # this scanner must skip those lines while keeping byte-length framing strict.
+    try:
+        while offset < len(stream):
+            while offset < len(stream) and stream[offset] in (10, 13):
+                offset += 1
+            if offset >= len(stream):
+                break
+            newline = stream.find(b"\n", offset)
+            line_end = len(stream) if newline < 0 else newline
+            colon = stream.find(b":", offset, line_end)
+            if colon < 0 or colon == offset:
+                offset = len(stream) if newline < 0 else newline + 1
+                continue
+            encoded_start = colon + 1
+            if encoded_start < len(stream) and stream[encoded_start] == ord("T"):
+                length_match = re.match(rb"T([0-9a-fA-F]+),", stream[encoded_start:])
+                if not length_match:
+                    raise FuxamError("Fuxam returned malformed term page data.")
+                byte_length = int(length_match.group(1), 16)
+                start = encoded_start + length_match.end()
+                end = start + byte_length
+                if end > len(stream):
+                    raise FuxamError("Fuxam returned truncated term page data.")
+                offset = end
+                continue
+            encoded = stream[encoded_start:line_end]
+            offset = len(stream) if newline < 0 else newline + 1
+            if b"coursesByCategory" not in encoded:
+                continue
+            stripped = encoded.lstrip()
+            if not stripped.startswith((b"{", b"[")):
+                continue
+            try:
+                value = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise FuxamError("Fuxam returned malformed term page data.") from exc
+            matches.extend(_find_term_payloads(value))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise FuxamError("Fuxam returned malformed term page data.") from exc
+    if len(matches) != 1:
+        raise FuxamError(
+            "Fuxam returned no unique current-term booking payload; "
+            "the frontend may have changed."
+        )
+    return matches[0]
+
+
 class FuxamClient:
     def __init__(self) -> None:
         self.token: str | None = None
         self.token_expires_at = 0.0
         self.user_id: str | None = None
+        self.organization_id = ""
         self.context_cache: dict[str, str] | None = None
         self.build_id: str | None = None
-        self.actions: dict[str, str] = {}
+        self.actions: dict[tuple[str, str], str] = {}
+
+    def _require_account(self, expected_account: str) -> None:
+        if not self.user_id or not hmac.compare_digest(
+            account_fingerprint(self.user_id, self.organization_id), expected_account
+        ):
+            raise MutationPreconditionChanged(
+                "ACCOUNT_CHANGED: the signed-in Fuxam account changed."
+            )
 
     def _open(
         self,
@@ -910,6 +1331,7 @@ class FuxamClient:
         authenticated: bool = True,
         require_context: bool = True,
         retry: bool = True,
+        expected_account: str | None = None,
     ) -> bytes:
         request_headers = {"user-agent": USER_AGENT, **(headers or {})}
         _, hostname, port = origin(url)
@@ -920,9 +1342,14 @@ class FuxamClient:
         if authenticated:
             if hostname != "fuxam.app":
                 raise FuxamError("Refused to send a Fuxam token to another host.")
-            request_headers["authorization"] = f"Bearer {self._session_token()}"
+            token = self._session_token()
+            if expected_account is not None:
+                self._require_account(expected_account)
+            request_headers["authorization"] = f"Bearer {token}"
             if require_context:
                 self.context()
+        elif expected_account is not None:
+            raise FuxamError("Refused an account-bound unauthenticated request.")
         elif (
             any(name.lower() == "cookie" for name in request_headers)
             and hostname != "clerk.fuxam.app"
@@ -949,9 +1376,14 @@ class FuxamClient:
                     authenticated=authenticated,
                     require_context=require_context,
                     retry=False,
+                    expected_account=expected_account,
                 )
             raise FuxamError(f"Fuxam request failed with HTTP {exc.code}.") from exc
         except urllib.error.URLError as exc:
+            raise FuxamError("Could not reach Fuxam.") from exc
+        except http.client.HTTPException as exc:
+            raise FuxamError("Fuxam returned an incomplete response.") from exc
+        except OSError as exc:
             raise FuxamError("Could not reach Fuxam.") from exc
 
     def _json(
@@ -960,6 +1392,7 @@ class FuxamClient:
         query: dict[str, Any] | None = None,
         *,
         require_context: bool = True,
+        expected_account: str | None = None,
     ) -> Any:
         url = urllib.parse.urljoin(BASE_URL, path)
         filtered = {
@@ -973,6 +1406,7 @@ class FuxamClient:
             url,
             headers={"accept": "application/json"},
             require_context=require_context,
+            expected_account=expected_account,
         )
         try:
             return json.loads(body)
@@ -1016,9 +1450,16 @@ class FuxamClient:
         last_token = as_object(active.get("last_active_token"), "Clerk token")
         if not isinstance(last_token.get("jwt"), str):
             raise FuxamError("The active Clerk session cannot be renewed.")
+        raw_organization_id = active.get("last_active_organization_id")
+        if raw_organization_id is None:
+            organization_id = ""
+        elif isinstance(raw_organization_id, str):
+            organization_id = raw_organization_id
+        else:
+            raise FuxamError("Clerk returned an invalid organization context.")
         form = urllib.parse.urlencode(
             {
-                "organization_id": active.get("last_active_organization_id") or "",
+                "organization_id": organization_id,
                 "tab_state": "focused",
                 "token": last_token["jwt"],
             }
@@ -1050,10 +1491,13 @@ class FuxamClient:
             claims.get("exp"), int | float
         ):
             raise FuxamError("The Clerk token is missing identity or expiry data.")
-        if self.user_id and self.user_id != claims["sub"]:
+        if self.user_id and (
+            self.user_id != claims["sub"] or self.organization_id != organization_id
+        ):
             self.context_cache = None
             self.actions.clear()
         self.user_id = claims["sub"]
+        self.organization_id = organization_id
         self.token = token
         self.token_expires_at = float(claims["exp"])
         return token
@@ -1108,8 +1552,30 @@ class FuxamClient:
         }
         return self.context_cache
 
+    def account_fingerprint(self, *, force: bool = False) -> str:
+        if force:
+            self._session_token(force=True)
+        self.context()
+        if not self.user_id:
+            raise FuxamError("The authenticated session has no user ID.")
+        return account_fingerprint(self.user_id, self.organization_id)
+
     def enrolled(self, search: str = "") -> Any:
         return self._json("/api/widgets/get-courses", {"search": search})
+
+    def term_courses(self, *, expected_account: str | None = None) -> dict[str, Any]:
+        dashboard_url = self.context()["dashboardUrl"]
+        suffix = "/my-courses"
+        if not dashboard_url.endswith(suffix):
+            raise FuxamError("Could not derive Fuxam's current-term page safely.")
+        term_url = dashboard_url[: -len(suffix)] + "/my-term"
+        body = self._open(
+            term_url,
+            headers={"accept": "text/html"},
+            require_context=False,
+            expected_account=expected_account,
+        )
+        return parse_term_page(body)
 
     def study_plan(self, focus_id: str | None, term_id: str | None) -> Any:
         context = self.context()
@@ -1215,9 +1681,16 @@ class FuxamClient:
             },
         )
 
-    def _action_sources(self, page_url: str) -> dict[str, set[str]]:
+    def _action_sources(
+        self, page_url: str, *, expected_account: str | None = None
+    ) -> dict[str, set[str]]:
         try:
-            html = self._open(page_url, headers={"accept": "text/html"}).decode()
+            html = self._open(
+                page_url,
+                headers={"accept": "text/html"},
+                require_context=False,
+                expected_account=expected_account,
+            ).decode()
         except UnicodeDecodeError as exc:
             raise FuxamError("Fuxam returned malformed page data.") from exc
         sources = {
@@ -1235,43 +1708,155 @@ class FuxamClient:
         )
         for source in sources:
             try:
-                script = self._open(source, require_context=False).decode()
+                script = self._open(
+                    source,
+                    require_context=False,
+                    expected_account=expected_account,
+                ).decode()
             except UnicodeDecodeError as exc:
                 raise FuxamError("Fuxam returned malformed script data.") from exc
             for action_id, name in pattern.findall(script):
                 actions.setdefault(name, set()).add(action_id)
         return actions
 
-    def _action(self, name: str, args: list[Any], page_url: str | None = None) -> Any:
-        if name not in READ_ONLY_ACTIONS:
-            raise FuxamError("Refused a non-read-only Fuxam action.")
-        context = self.context()
-        target = page_url or context["dashboardUrl"]
-        build = as_object(self._json("/api/build-id"), "build")
+    def current_build_id(self, *, expected_account: str | None = None) -> str:
+        build = as_object(
+            self._json(
+                "/api/build-id",
+                require_context=False,
+                expected_account=expected_account,
+            ),
+            "build",
+        )
         current_build = build.get("buildId")
-        if not isinstance(current_build, str):
+        if not isinstance(current_build, str) or not current_build:
             raise FuxamError("Fuxam returned no build ID.")
         if current_build != self.build_id:
             self.build_id = current_build
             self.actions.clear()
-        if name not in self.actions:
-            candidates = self._action_sources(target).get(name, set())
-            if len(candidates) != 1:
+        return current_build
+
+    def _resolve_action(
+        self,
+        name: str,
+        page_url: str,
+        *,
+        expected_build: str | None = None,
+        expected_account: str | None = None,
+    ) -> str:
+        current_build = self.current_build_id(expected_account=expected_account)
+        if expected_build is not None and not hmac.compare_digest(
+            current_build, expected_build
+        ):
+            raise MutationPreconditionChanged(
+                "BUILD_CHANGED: Fuxam changed after the preview."
+            )
+        cache_key = (page_url, name)
+        if cache_key not in self.actions:
+            action_sources = self._action_sources(
+                page_url, expected_account=expected_account
+            )
+            allowed_actions = READ_ONLY_ACTIONS | MUTATION_ACTIONS
+            for action_name, candidates in action_sources.items():
+                if action_name in allowed_actions and len(candidates) == 1:
+                    self.actions[(page_url, action_name)] = next(iter(candidates))
+            if cache_key not in self.actions:
                 raise FuxamError(
                     f"Could not uniquely resolve Fuxam action {name}; the frontend may have changed."
                 )
-            self.actions[name] = next(iter(candidates))
+        return self.actions[cache_key]
+
+    def _invoke_action(
+        self,
+        action_id: str,
+        args: list[Any],
+        page_url: str,
+        *,
+        retry: bool,
+        expected_account: str | None = None,
+    ) -> Any:
+        encoded = json.dumps(args, separators=(",", ":")).encode()
+        if len(encoded) > 64 * 1024:
+            raise FuxamError("Refused an unexpectedly large Fuxam action request.")
         body = self._open(
-            target,
+            page_url,
             method="POST",
             headers={
                 "accept": "text/x-component",
                 "content-type": "text/plain;charset=UTF-8",
-                "next-action": self.actions[name],
+                "next-action": action_id,
             },
-            data=json.dumps(args, separators=(",", ":")).encode(),
+            data=encoded,
+            retry=retry,
+            require_context=False,
+            expected_account=expected_account,
         )
         return parse_flight(body)
+
+    def _action(
+        self,
+        name: str,
+        args: list[Any],
+        page_url: str | None = None,
+        *,
+        expected_account: str | None = None,
+    ) -> Any:
+        if name not in READ_ONLY_ACTIONS:
+            raise FuxamError("Refused a non-read-only Fuxam action.")
+        target = page_url or self.context()["dashboardUrl"]
+        action_id = self._resolve_action(
+            name, target, expected_account=expected_account
+        )
+        return self._invoke_action(
+            action_id,
+            args,
+            target,
+            retry=True,
+            expected_account=expected_account,
+        )
+
+    def _mutation_action(
+        self,
+        name: str,
+        args: list[Any],
+        *,
+        expected_account: str,
+        expected_build: str,
+        final_precondition: Callable[[], None] | None = None,
+    ) -> Any:
+        if name not in MUTATION_ACTIONS:
+            raise FuxamError("Refused an unsupported mutation action.")
+        self._session_token(force=True)
+        self._require_account(expected_account)
+        target = self.context()["dashboardUrl"]
+        action_id = self._resolve_action(
+            name,
+            target,
+            expected_build=expected_build,
+            expected_account=expected_account,
+        )
+        if not hmac.compare_digest(
+            self.current_build_id(expected_account=expected_account), expected_build
+        ):
+            raise MutationPreconditionChanged(
+                "BUILD_CHANGED: Fuxam changed after the preview."
+            )
+        self._require_account(expected_account)
+        if final_precondition is not None:
+            final_precondition()
+            self._require_account(expected_account)
+        try:
+            return self._invoke_action(
+                action_id,
+                args,
+                target,
+                retry=False,
+                expected_account=expected_account,
+            )
+        except MutationPreconditionChanged:
+            raise
+        except (FuxamError, json.JSONDecodeError, KeyboardInterrupt) as exc:
+            raise MutationOutcomeUnknown() from exc
 
     def bookable(self, search: str, page: int, per_page: int) -> Any:
         return self._action(
@@ -1284,6 +1869,49 @@ class FuxamClient:
         return self._action(
             "checkCourseConflictsAction",
             [{"courseIds": unique_ids, "includeAppointmentsForCourseIds": unique_ids}],
+        )
+
+    def booking_conflicts(
+        self,
+        course_id: str,
+        enrolled_ids: list[str],
+        *,
+        expected_account: str | None = None,
+    ) -> Any:
+        course_ids = list(dict.fromkeys([course_id, *enrolled_ids]))
+        if len(course_ids) < 2:
+            return []
+        return self._action(
+            "checkCourseConflictsAction",
+            [
+                {
+                    "courseIds": course_ids,
+                    "includeAppointmentsForCourseIds": [course_id],
+                }
+            ],
+            expected_account=expected_account,
+        )
+
+    def mutate_booking(
+        self,
+        operation: str,
+        course_id: str,
+        *,
+        expected_account: str,
+        expected_build: str,
+        final_precondition: Callable[[], None] | None = None,
+    ) -> Any:
+        action = BOOKING_ACTIONS.get(operation)
+        if action is None:
+            raise FuxamError("Refused an unsupported booking operation.")
+        action_name, _ = action
+        args = [[course_id]] if operation == "enroll" else [course_id]
+        return self._mutation_action(
+            action_name,
+            args,
+            expected_account=expected_account,
+            expected_build=expected_build,
+            final_precondition=final_precondition,
         )
 
     def module_details(
@@ -1363,6 +1991,330 @@ class FuxamClient:
         }
 
 
+def account_fingerprint(user_id: str, organization_id: str = "") -> str:
+    if not isinstance(user_id, str) or not user_id:
+        raise FuxamError("The authenticated session has no user ID.")
+    if not isinstance(organization_id, str):
+        raise FuxamError("The authenticated session has an invalid organization ID.")
+    encoded = (
+        b"fuxam-local-account-v2\0"
+        + user_id.encode("utf-8")
+        + b"\0"
+        + organization_id.encode("utf-8")
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_course_id(value: str) -> str:
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise FuxamError(
+            "INVALID_COURSE_ID: use the exact ID from learning-units."
+        ) from exc
+    if (
+        not encoded
+        or len(encoded) > MAX_COURSE_ID_BYTES
+        or re.fullmatch(rb"[A-Za-z0-9_-]+", encoded) is None
+    ):
+        raise FuxamError("INVALID_COURSE_ID: use the exact ID from learning-units.")
+    return value
+
+
+def _booking_target(summary: dict[str, Any], course_id: str) -> dict[str, Any]:
+    matches = [
+        item
+        for item in summary.get("learningUnits", [])
+        if isinstance(item, dict) and item.get("courseId") == course_id
+    ]
+    if len(matches) != 1:
+        raise FuxamError("TARGET_NOT_FOUND: no unique active-term course has that ID.")
+    return matches[0]
+
+
+def _booking_postcondition(operation: str, state: str) -> bool:
+    if operation == "enroll":
+        return state == "ENROLLED"
+    if operation == "unenroll":
+        return state in {"BOOKABLE", "FULL"}
+    if operation == "join-waitlist":
+        return state == "WAITLISTED"
+    if operation == "leave-waitlist":
+        return state in {"BOOKABLE", "FULL"}
+    return False
+
+
+def _booking_eligibility(
+    operation: str, target: dict[str, Any], summary: dict[str, Any]
+) -> None:
+    state = target["state"]
+    operation_eligible = {
+        "enroll": state == "BOOKABLE",
+        "unenroll": state == "ENROLLED" and target["canUnenroll"],
+        "join-waitlist": state == "FULL" and summary["waitlistEnabled"],
+        "leave-waitlist": state == "WAITLISTED",
+    }[operation]
+    eligible = summary["canBookCourses"] and operation_eligible
+    if not eligible:
+        raise FuxamError(
+            f"NOT_ELIGIBLE: {operation} is unavailable from state {state}."
+        )
+
+
+def _booking_fingerprint(value: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _booking_conflict_snapshot(value: Any, target_course_id: str) -> dict[str, Any]:
+    if not isinstance(value, list):
+        raise FuxamError("Fuxam returned unsupported conflict-check data.")
+    relevant: list[dict[str, Any]] = []
+    for conflict in value:
+        if not isinstance(conflict, dict):
+            raise FuxamError("Fuxam returned unsupported conflict-check data.")
+        course_a = conflict.get("courseA")
+        course_b = conflict.get("courseB")
+        if not isinstance(course_a, dict) or not isinstance(course_b, dict):
+            raise FuxamError("Fuxam returned unsupported conflict-check data.")
+        course_a_id = course_a.get("id")
+        course_b_id = course_b.get("id")
+        if (
+            not isinstance(course_a_id, str)
+            or not course_a_id
+            or not isinstance(course_b_id, str)
+            or not course_b_id
+        ):
+            raise FuxamError("Fuxam returned unsupported conflict-check data.")
+        if target_course_id in {course_a_id, course_b_id}:
+            relevant.append(conflict)
+    return {
+        "checked": True,
+        "hasConflicts": bool(relevant),
+        "count": len(relevant),
+    }
+
+
+def _waitlist_conflict_warning(value: Any) -> bool | None:
+    if not isinstance(value, dict):
+        return None
+    warning = value.get("hasConflicts")
+    return warning if type(warning) is bool else None
+
+
+def _booking_snapshot(
+    client: FuxamClient,
+    operation: str,
+    course_id: str,
+    expected_account: str,
+) -> dict[str, Any]:
+    summary = summarize_term_courses(
+        client.term_courses(expected_account=expected_account)
+    )
+    target = _booking_target(summary, course_id)
+    desired_state = BOOKING_ACTIONS[operation][1]
+    if _booking_postcondition(operation, target["state"]):
+        return {
+            "alreadyApplied": True,
+            "summary": summary,
+            "target": target,
+            "desiredState": desired_state,
+        }
+    _booking_eligibility(operation, target, summary)
+
+    conflict_check: dict[str, Any] = {"checked": False}
+    if operation == "enroll":
+        enrolled_ids = [
+            item["courseId"]
+            for item in summary["learningUnits"]
+            if item["state"] == "ENROLLED"
+        ]
+        if enrolled_ids:
+            conflict_check = _booking_conflict_snapshot(
+                client.booking_conflicts(
+                    course_id,
+                    enrolled_ids,
+                    expected_account=expected_account,
+                ),
+                course_id,
+            )
+        if conflict_check.get("hasConflicts"):
+            raise FuxamError(
+                "SCHEDULE_CONFLICTS: Fuxam found a schedule conflict; inspect and "
+                "confirm it in the official UI."
+            )
+    build_id = client.current_build_id(expected_account=expected_account)
+    basis = {
+        "schema": 1,
+        "operation": operation,
+        "courseId": course_id,
+        "courseName": target["name"],
+        "termId": summary["termId"],
+        "term": summary["term"],
+        "buildId": build_id,
+        "accountFingerprint": expected_account,
+        "observedState": target["state"],
+        "desiredState": desired_state,
+        "booking": {
+            "capacity": target["capacity"],
+            "enrolledCount": target["enrolledCount"],
+            "isFull": target["isFull"],
+            "canUnenroll": target["canUnenroll"],
+            "waitlistPosition": target["waitlistPosition"],
+            "canBookCourses": summary["canBookCourses"],
+            "waitlistEnabled": summary["waitlistEnabled"],
+        },
+        "conflictCheck": conflict_check,
+    }
+    fingerprint = _booking_fingerprint(basis)
+    return {
+        "alreadyApplied": False,
+        "summary": summary,
+        "target": target,
+        "desiredState": desired_state,
+        "buildId": build_id,
+        "fingerprint": fingerprint,
+        "preview": {
+            "ok": True,
+            "mode": "preview",
+            "operation": operation,
+            "target": {
+                "courseId": course_id,
+                "name": target["name"],
+                "termId": summary["termId"],
+                "term": summary["term"],
+                "termName": summary["termName"],
+            },
+            "observedState": target["state"],
+            "desiredState": desired_state,
+            "booking": basis["booking"],
+            "conflictCheck": conflict_check,
+            "confirmationRequired": True,
+            "confirmationFingerprint": fingerprint,
+            "changed": False,
+        },
+    }
+
+
+def booking_workflow(
+    client: FuxamClient,
+    operation: str,
+    course_id: str,
+    *,
+    apply: bool,
+    confirmation: str | None,
+) -> dict[str, Any]:
+    """Preview or safely apply one exact active-term booking transition."""
+    if operation not in BOOKING_ACTIONS:
+        raise FuxamError("Refused an unsupported booking operation.")
+    course_id = _validate_course_id(course_id)
+    expected_account = client.account_fingerprint(force=True)
+    snapshot = _booking_snapshot(client, operation, course_id, expected_account)
+    summary = snapshot["summary"]
+    target = snapshot["target"]
+    desired_state = snapshot["desiredState"]
+    if snapshot["alreadyApplied"]:
+        return {
+            "ok": True,
+            "mode": "apply" if apply else "preview",
+            "operation": operation,
+            "target": {
+                "courseId": course_id,
+                "name": target["name"],
+                "termId": summary["termId"],
+                "term": summary["term"],
+                "termName": summary["termName"],
+            },
+            "observedState": target["state"],
+            "desiredState": desired_state,
+            "confirmationRequired": False,
+            "changed": False,
+            "result": "already-applied",
+        }
+    preview = snapshot["preview"]
+    fingerprint = snapshot["fingerprint"]
+    build_id = snapshot["buildId"]
+    if not apply:
+        return preview
+    if not confirmation:
+        raise FuxamError(
+            "CONFIRMATION_REQUIRED: preview first, then pass --apply --confirm "
+            "with its exact fingerprint."
+        )
+    if not hmac.compare_digest(confirmation, fingerprint):
+        raise FuxamError(
+            "STALE_PREVIEW: the confirmation does not match fresh Fuxam state."
+        )
+
+    def final_precondition() -> None:
+        fresh = _booking_snapshot(client, operation, course_id, expected_account)
+        if fresh["alreadyApplied"] or not hmac.compare_digest(
+            confirmation, fresh["fingerprint"]
+        ):
+            raise MutationPreconditionChanged(
+                "STALE_PREVIEW: Fuxam state changed before the mutation request."
+            )
+
+    ambiguous = False
+    mutation_result: Any = None
+    try:
+        mutation_result = client.mutate_booking(
+            operation,
+            course_id,
+            expected_account=expected_account,
+            expected_build=build_id,
+            final_precondition=final_precondition,
+        )
+    except MutationOutcomeUnknown:
+        ambiguous = True
+    try:
+        verified_summary = summarize_term_courses(
+            client.term_courses(expected_account=expected_account)
+        )
+        if verified_summary["termId"] != summary["termId"]:
+            raise FuxamError("The active Fuxam term changed after the mutation.")
+        verified_target = _booking_target(verified_summary, course_id)
+    except (FuxamError, KeyboardInterrupt) as exc:
+        raise FuxamError(
+            "OUTCOME_UNKNOWN: Fuxam state could not be verified; inspect the official "
+            "UI before trying again."
+        ) from exc
+    if not _booking_postcondition(operation, verified_target["state"]):
+        code = "OUTCOME_UNKNOWN" if ambiguous else "POSTCONDITION_FAILED"
+        raise FuxamError(
+            f"{code}: the expected state was not observed; inspect the official UI "
+            "before trying again."
+        )
+    result = {
+        **preview,
+        "mode": "apply",
+        "confirmationRequired": False,
+        "changed": True,
+        "result": "reconciled-success" if ambiguous else "verified-success",
+        "verifiedState": verified_target["state"],
+    }
+    if operation == "join-waitlist":
+        conflict_warning = _waitlist_conflict_warning(mutation_result)
+        result["scheduleConflictWarning"] = conflict_warning
+        result["requiresUiInspection"] = conflict_warning is not False
+        if conflict_warning is True:
+            result["warning"] = (
+                "SCHEDULE_CONFLICT_WARNING: inspect the official Fuxam UI for "
+                "the conflict details."
+            )
+        elif conflict_warning is None:
+            result["warning"] = (
+                "WAITLIST_CONFLICT_STATUS_UNKNOWN: Fuxam's warning response could "
+                "not be verified; inspect the official UI."
+            )
+    return result
+
+
 def add_common_page_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--direction", choices=("initial", "past", "future"), default="initial"
@@ -1409,17 +2361,43 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("operation", choices=("set", "status", "clear"))
     commands.add_parser("context", help="Verify the CODE study context")
     enrolled = commands.add_parser(
-        "enrolled", help="List raw records or inspect ACTIVE/offering-tag overlap"
+        "enrolled", help="List raw records or confirmed active-term enrollments"
     )
-    enrolled.add_argument("--search", default="")
+    enrolled.add_argument(
+        "--search", default="", help="search older raw records (without --term)"
+    )
     enrolled.add_argument(
         "--term",
-        help=(
-            "match catalog offering tags only; this does not prove term enrollment "
-            "or workload"
-        ),
+        help="show confirmed enrollments when this is the active Fuxam term",
     )
     add_output_format_argument(enrolled)
+    learning_units = commands.add_parser(
+        "learning-units",
+        help="Show active-term enrolled, waitlisted, self-study, and bookable units",
+    )
+    learning_units.add_argument(
+        "--term", help="require this semester to be Fuxam's active term"
+    )
+    add_output_format_argument(learning_units)
+    booking = commands.add_parser(
+        "booking", help="Preview or apply one active-term learning-unit change"
+    )
+    booking_operations = booking.add_subparsers(dest="operation", required=True)
+    for operation in BOOKING_ACTIONS:
+        booking_operation = booking_operations.add_parser(operation)
+        booking_operation.add_argument(
+            "course_id", help="exact course ID from learning-units"
+        )
+        booking_operation.add_argument(
+            "--apply",
+            action="store_true",
+            help="submit the change after a matching preview",
+        )
+        booking_operation.add_argument(
+            "--confirm",
+            dest="confirmation",
+            help="exact sha256 fingerprint returned by the preview",
+        )
     modules = commands.add_parser(
         "modules", help="List formally elected study-plan modules"
     )
@@ -1518,10 +2496,24 @@ def run(args: argparse.Namespace) -> Any:
         context.pop("moduleCatalogUrl", None)
         return context
     if args.command == "enrolled":
+        if args.term is not None:
+            if args.search:
+                raise FuxamError("--search and --term cannot be combined.")
+            return summarize_term_enrolled(client.term_courses(), args.term)
         enrolled = client.enrolled(args.search)
-        if args.term or args.output_format == "table":
-            return summarize_enrolled(enrolled, args.term)
-        return enrolled
+        return (
+            summarize_enrolled(enrolled) if args.output_format == "table" else enrolled
+        )
+    if args.command == "learning-units":
+        return summarize_term_courses(client.term_courses(), args.term)
+    if args.command == "booking":
+        return booking_workflow(
+            client,
+            args.operation,
+            args.course_id,
+            apply=args.apply,
+            confirmation=args.confirmation,
+        )
     if args.command == "modules":
         return summarize_modules(client.study_plan(None, None), args.term)
     if args.command == "bookable":
