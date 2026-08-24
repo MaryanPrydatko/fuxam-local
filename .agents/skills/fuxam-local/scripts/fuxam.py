@@ -19,7 +19,7 @@ from typing import Any
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
@@ -542,7 +542,7 @@ class FuxamClient:
             raise FuxamError("The active Clerk session cannot be renewed.")
         form = urllib.parse.urlencode(
             {
-                "organization_id": active.get("last_active_organization_id", ""),
+                "organization_id": active.get("last_active_organization_id") or "",
                 "tab_state": "focused",
                 "token": last_token["jwt"],
             }
