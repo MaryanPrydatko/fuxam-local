@@ -16,7 +16,9 @@ Resolve the directory containing this `SKILL.md` as `<skill-root>`. Do not assum
 python3 "<skill-root>/scripts/fuxam.py" <command>
 ```
 
-Start broad planning with `explore`, then use identifiers from its JSON output with narrower commands. Prefer `enrolled` for current courses, `agenda` for the student's schedule, `module-details` for a shortlist, and `module-attempts` for concrete progress records. Use `--help` for exact arguments.
+Use the narrow evidence source for the question. For term-specific enrollment, run `enrolled --term <term>` for current learning units and `modules --term <term>` for formal study-plan elections. Use `explore` for catalog planning, `agenda` for schedules, `module-details` for a shortlist, and `module-attempts` for concrete progress. JSON is the agent default; use `--format table` only when the user wants terminal output. Use `--help` for exact arguments.
+
+Separate enrollment, offering, association, and election evidence. An enrolled record proves current learning-unit enrollment; a term tag proves only that the unit is offered in that term; a `modules` link proves an explicit learning-unit association; and a code present only in a title is a title mention. Only an elected study-plan record proves formal module election. For term-specific module questions, lead with formal elections and list term-tagged learning units separately. State unknowns instead of promoting weaker evidence.
 
 Keep credentials inside the hidden local Keychain prompt: never request, print, log, or summarize one in chat. When authentication is missing or expired, stop the data request and direct the user to [references/authentication.md](references/authentication.md). The user runs that interactive command themselves. For verification requests, follow [references/testing.md](references/testing.md).
 

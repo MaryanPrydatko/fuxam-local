@@ -77,7 +77,7 @@ The smoke report contains only pass/fail results and broad response types—not 
 In Codex:
 
 ```text
-Use $fuxam-local to show my enrolled modules.
+Use $fuxam-local to show my active learning units and formal module elections for Fall 2026.
 Use $fuxam-local to summarize my deadlines next month.
 Use $fuxam-local to check these courses for schedule conflicts.
 ```
@@ -89,11 +89,17 @@ Or use the CLI yourself:
 ```sh
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
 
-python3 "$FUXAM" --help
-python3 "$FUXAM" explore
-python3 "$FUXAM" enrolled
-python3 "$FUXAM" agenda --limit 25
+"$FUXAM" --help
+"$FUXAM" enrolled
+"$FUXAM" enrolled --term "Fall 2026" --format table
+"$FUXAM" modules --format table
+"$FUXAM" modules --term "Spring 2026" --format table
+"$FUXAM" agenda --limit 25
 ```
+
+`enrolled --term` lists active learning units carrying that offering tag. `modules` lists formal elections from the study plan. The output keeps explicit learning-unit/module associations separate from codes that appear only in a title.
+
+The CLI is intentionally read-only. Adding, electing, booking, or dropping modules still requires Fuxam's official UI.
 
 ## Privacy and safety
 

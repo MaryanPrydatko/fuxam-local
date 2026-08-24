@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-08-24
+
+- Added term-filtered learning-unit summaries with compact terminal tables.
+- Added a `modules` command for formal study-plan elections.
+- Labeled explicit module associations separately from title-only code mentions.
+- Surfaced ambiguous or incomplete records instead of presenting them as definitive empty results.
+- Sanitized terminal tables against control-character injection.
+- Treated an empty catalog search as a valid result instead of a pagination error.
+
 ## 0.2.1 — 2026-08-24
 
 - Fixed Clerk token renewal for accounts without an active organization.
