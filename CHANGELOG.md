@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 — 2026-08-24
+
+- Moved installer backups outside skill-discovery directories so old copies cannot appear as duplicate skills.
+
 ## 0.3.1 — 2026-08-24
 
 - Stopped presenting `ACTIVE` learning-unit records with a matching offering tag as term enrollment or current workload.

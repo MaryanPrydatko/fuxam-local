@@ -35,6 +35,7 @@ python3 install.py --replace
 ```
 
 The installer keeps one shared copy in `~/.agents/skills/fuxam-local` and makes it available to Codex and Claude. Existing copies are backed up before replacement.
+Backups live in `~/.agents/backups/fuxam-local`, outside directories that agents scan for skills.
 
 Start a new Codex or Claude session after installing. Any other local agent can call `scripts/fuxam.py` directly.
 
