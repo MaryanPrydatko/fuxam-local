@@ -9,6 +9,7 @@ import json
 import pathlib
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest import mock
 
@@ -182,6 +183,48 @@ class CredentialAndNetworkTests(unittest.TestCase):
         }
         self.assertEqual(headers["authorization"], "Bearer opaque-value")
         self.assertNotIn("cookie", headers)
+
+    def test_session_token_encodes_a_missing_organization_as_blank(self) -> None:
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"sub": "synthetic-user", "exp": 2_000_000_000}).encode()
+        ).rstrip(b"=")
+        session_token = ".".join(("header", payload.decode(), "signature"))
+        clerk_client = {
+            "response": {
+                "last_active_session_id": "sess_synthetic",
+                "sessions": [
+                    {
+                        "id": "sess_synthetic",
+                        "status": "active",
+                        "last_active_organization_id": None,
+                        "last_active_token": {"jwt": "synthetic-renewal-token"},
+                    }
+                ],
+            }
+        }
+        opener = mock.Mock()
+        opener.open.side_effect = (
+            FakeResponse(json.dumps(clerk_client).encode()),
+            FakeResponse(json.dumps({"jwt": session_token}).encode()),
+        )
+        keychain = mock.Mock()
+        keychain.get.return_value = "synthetic-client-cookie"
+
+        with (
+            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(
+                fuxam.urllib.request, "build_opener", return_value=opener
+            ),
+        ):
+            self.assertEqual(fuxam.FuxamClient()._session_token(), session_token)
+
+        token_request = opener.open.call_args_list[1].args[0]
+        form = urllib.parse.parse_qs(
+            token_request.data.decode(), keep_blank_values=True
+        )
+        self.assertEqual(form["organization_id"], [""])
+        self.assertEqual(form["tab_state"], ["focused"])
+        self.assertEqual(form["token"], ["synthetic-renewal-token"])
 
     def test_oversized_response_is_rejected(self) -> None:
         opener = FakeOpener(b"12345")

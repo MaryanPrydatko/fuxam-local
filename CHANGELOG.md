@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-08-24
+
+- Fixed Clerk token renewal for accounts without an active organization.
+- Added a regression test for the null-organization session shape.
+
 ## 0.2.0 — 2026-08-24
 
 - Made the Agent Skill host-neutral and aligned it with the open Agent Skills layout.
