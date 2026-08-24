@@ -11,6 +11,7 @@ import json
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,7 +20,7 @@ from typing import Any
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
@@ -343,6 +344,439 @@ def as_object(value: Any, label: str = "response") -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FuxamError(f"Fuxam returned an unsupported {label} shape.")
     return value
+
+
+def canonical_term(value: str) -> str:
+    """Normalize human semester names and CODE term codes."""
+    normalized = re.sub(r"\s+", " ", value).strip()
+    code_match = re.fullmatch(r"(?i)(FS|SS)[ _-]?(\d{2}|\d{4})", normalized)
+    if code_match:
+        year = code_match.group(2)[-2:]
+        return f"{code_match.group(1).upper()}{year}"
+    name_match = re.fullmatch(r"(?i)(fall|spring)(?: semester)?\s+(\d{4})", normalized)
+    if name_match:
+        prefix = "FS" if name_match.group(1).lower() == "fall" else "SS"
+        return f"{prefix}{name_match.group(2)[-2:]}"
+    raise FuxamError(
+        "Use an unambiguous term such as FS26, Fall 2026, SS26, or Spring 2026."
+    )
+
+
+def _term_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return canonical_term(value)
+    except FuxamError:
+        return None
+
+
+def _module_codes(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    matches = re.findall(
+        r"(?<![A-Z0-9])([A-Z]{2,5}_\d{2,3})(?![A-Z0-9])", value.upper()
+    )
+    return list(dict.fromkeys(matches))
+
+
+def _offering_terms(course: dict[str, Any]) -> tuple[list[str], bool]:
+    terms: list[str] = []
+    tags = course.get("courseTags", [])
+    if not isinstance(tags, list):
+        return terms, True
+    malformed = False
+    for link in tags:
+        if not isinstance(link, dict):
+            malformed = True
+            continue
+        tag = link.get("tag")
+        if not isinstance(tag, dict):
+            malformed = True
+            continue
+        name = tag.get("name")
+        if not isinstance(name, str):
+            malformed = True
+            continue
+        match = re.fullmatch(r"(?i)Offered in\s+(.+)", name)
+        term = _term_or_none(match.group(1)) if match else None
+        if match and not term:
+            malformed = True
+        if term and term not in terms:
+            terms.append(term)
+    return terms, malformed
+
+
+def summarize_enrolled(value: Any, term: str | None = None) -> dict[str, Any]:
+    """Return a small enrollment view with explicit evidence labels."""
+    response = as_object(value, "enrolled courses")
+    courses = response.get("courses")
+    if not isinstance(courses, list):
+        raise FuxamError("Fuxam returned unsupported enrolled-course data.")
+    target = canonical_term(term) if term else None
+    learning_units: list[dict[str, Any]] = []
+    schema_issues = 0
+    for course in courses:
+        if not isinstance(course, dict):
+            schema_issues += 1
+            continue
+        status = course.get("status")
+        if not isinstance(status, str):
+            schema_issues += 1
+            continue
+        if status != "ACTIVE":
+            continue
+        name = course.get("name")
+        if not isinstance(name, str) or not name:
+            schema_issues += 1
+            continue
+        offering_terms, malformed_tags = _offering_terms(course)
+        if malformed_tags:
+            schema_issues += 1
+        if target and target not in offering_terms:
+            continue
+        explicit: list[dict[str, str | None]] = []
+        explicit_codes: set[str] = set()
+        modules = course.get("modules", [])
+        if isinstance(modules, list):
+            for module in modules:
+                if not isinstance(module, dict):
+                    schema_issues += 1
+                    continue
+                module_name = module.get("name")
+                code = module.get("code")
+                if not isinstance(code, str) or not code:
+                    codes = _module_codes(module_name)
+                    code = codes[0] if codes else None
+                if code:
+                    explicit_codes.add(code.upper())
+                if code or isinstance(module_name, str):
+                    explicit.append(
+                        {
+                            "code": code,
+                            "name": module_name
+                            if isinstance(module_name, str)
+                            else None,
+                        }
+                    )
+                else:
+                    schema_issues += 1
+        else:
+            schema_issues += 1
+        title_only = [
+            code for code in _module_codes(name) if code.upper() not in explicit_codes
+        ]
+        learning_units.append(
+            {
+                "name": name,
+                "status": status,
+                "offeringTerms": offering_terms,
+                "explicitModuleAssociations": explicit,
+                "titleOnlyModuleCodes": title_only,
+            }
+        )
+    learning_units.sort(key=lambda item: item["name"].casefold())
+    warnings: list[str] = []
+    if schema_issues:
+        warnings.append(
+            f"{schema_issues} enrolled-data field(s) used an unsupported shape; "
+            "results may be incomplete."
+        )
+    return {
+        "kind": "active-learning-unit-enrollments",
+        "term": target,
+        "total": len(learning_units),
+        "learningUnits": learning_units,
+        "complete": not schema_issues,
+        "warnings": warnings,
+        "evidence": {
+            "enrollment": "current learning-unit enrollment",
+            "term": "offering tag only",
+            "explicitModuleAssociations": "learning-unit association, not election",
+            "titleOnlyModuleCodes": "title mention only",
+        },
+    }
+
+
+def _study_item_terms(
+    item: dict[str, Any], term_names_by_id: dict[str, str]
+) -> tuple[list[str], bool, bool]:
+    terms: list[str] = []
+    unresolved = False
+    raw_direct = item.get("organizationTermName")
+    direct = _term_or_none(raw_direct)
+    if raw_direct not in (None, "") and not direct:
+        unresolved = True
+    if direct:
+        terms.append(direct)
+    organization_term = item.get("organizationTerm")
+    nested = (
+        _term_or_none(organization_term.get("name"))
+        if isinstance(organization_term, dict)
+        else None
+    )
+    if organization_term not in (None, {}) and not isinstance(organization_term, dict):
+        unresolved = True
+    elif isinstance(organization_term, dict):
+        raw_nested = organization_term.get("name")
+        if raw_nested not in (None, "") and not nested:
+            unresolved = True
+    if nested and nested not in terms:
+        terms.append(nested)
+    mapped: list[str] = []
+    term_ids = item.get("electedTermIds", [])
+    if isinstance(term_ids, list):
+        for term_id in term_ids:
+            term = term_names_by_id.get(term_id) if isinstance(term_id, str) else None
+            if not term:
+                unresolved = True
+            if term and term not in terms:
+                terms.append(term)
+            if term and term not in mapped:
+                mapped.append(term)
+    else:
+        unresolved = True
+    sources = [{term} for term in (direct, nested) if term]
+    if mapped:
+        sources.append(set(mapped))
+    conflict = len(sources) > 1 and any(source != sources[0] for source in sources[1:])
+    return terms, conflict, unresolved
+
+
+def summarize_modules(value: Any, term: str | None = None) -> dict[str, Any]:
+    """Return formal study-plan elections, optionally narrowed to one term."""
+    response = as_object(value, "study plan")
+    target = canonical_term(term) if term else None
+    term_names_by_id: dict[str, str] = {}
+    available_terms: list[str] = []
+    schema_issues = 0
+    terms = response.get("availableTerms", [])
+    if isinstance(terms, list):
+        for available in terms:
+            if not isinstance(available, dict):
+                schema_issues += 1
+                continue
+            term_id = available.get("id")
+            code = _term_or_none(available.get("name"))
+            if isinstance(term_id, str) and code:
+                term_names_by_id[term_id] = code
+            elif term_id is not None or available.get("name") is not None:
+                schema_issues += 1
+            if code and code not in available_terms:
+                available_terms.append(code)
+    else:
+        schema_issues += 1
+    modules: list[dict[str, Any]] = []
+    conflicts = 0
+    unresolved_terms = 0
+    unreadable_elections = 0
+    groups = response.get("electiveGroups", [])
+    if not isinstance(groups, list):
+        raise FuxamError("Fuxam returned unsupported study-plan data.")
+    for group in groups:
+        if not isinstance(group, dict):
+            schema_issues += 1
+            continue
+        items = group.get("availableStudyPlanItems", [])
+        if not isinstance(items, list):
+            schema_issues += 1
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                schema_issues += 1
+                continue
+            if item.get("isElected") is not True:
+                continue
+            item_terms, conflict, unresolved = _study_item_terms(item, term_names_by_id)
+            if conflict:
+                conflicts += 1
+            term_ambiguous = conflict or unresolved or not item_terms
+            if term_ambiguous:
+                unresolved_terms += 1
+            if target and (term_ambiguous or target not in item_terms):
+                continue
+            version = item.get("moduleVersion")
+            if not isinstance(version, dict):
+                unreadable_elections += 1
+                continue
+            course_module = version.get("courseModule")
+            module_name = (
+                course_module.get("name") if isinstance(course_module, dict) else None
+            )
+            if not isinstance(module_name, str) or not module_name:
+                unreadable_elections += 1
+                continue
+            codes = _module_codes(module_name)
+            modules.append(
+                {
+                    "code": "/".join(codes) if codes else None,
+                    "codes": codes,
+                    "name": module_name,
+                    "version": (
+                        version.get("name")
+                        if isinstance(version.get("name"), str)
+                        else None
+                    ),
+                    "ectsPoints": version.get("ectsPoints"),
+                    "isCoreModule": (
+                        item.get("isCoreModule")
+                        if isinstance(item.get("isCoreModule"), bool)
+                        else None
+                    ),
+                    "terms": item_terms,
+                    "formalElection": True,
+                    "termConflict": conflict,
+                    "termStatus": "ambiguous" if term_ambiguous else "confirmed",
+                }
+            )
+    modules.sort(key=lambda item: ((item["code"] or ""), item["name"].casefold()))
+    warnings: list[str] = []
+    if conflicts:
+        warnings.append("Some election records contain conflicting term sources.")
+    if unresolved_terms:
+        if target:
+            warnings.append(
+                f"{unresolved_terms} elected record(s) could not be assigned "
+                f"confidently while filtering for {target}."
+            )
+        else:
+            warnings.append(
+                f"{unresolved_terms} elected record(s) had unknown or conflicting "
+                "term evidence."
+            )
+    if unreadable_elections:
+        warnings.append(
+            f"{unreadable_elections} elected record(s) could not be displayed because "
+            "module details were incomplete."
+        )
+    if schema_issues:
+        warnings.append(
+            f"{schema_issues} study-plan field(s) used an unsupported shape; results "
+            "may be incomplete."
+        )
+    return {
+        "kind": "formal-module-elections",
+        "term": target,
+        "total": len(modules),
+        "modules": modules,
+        "availableTerms": sorted(available_terms),
+        "complete": not (unresolved_terms or unreadable_elections or schema_issues),
+        "unresolvedTermRecords": unresolved_terms,
+        "unreadableElectionRecords": unreadable_elections,
+        "warnings": warnings,
+        "evidence": "study-plan records with isElected=true",
+    }
+
+
+def _clean_cell(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    safe = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in str(value)
+    ).replace("|", "¦")
+    return " ".join(safe.split())
+
+
+def _render_table(headers: list[str], rows: list[list[Any]]) -> str:
+    cleaned = [[_clean_cell(cell) for cell in row] for row in rows]
+    widths = [len(header) for header in headers]
+    for row in cleaned:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+    lines = [
+        " | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)),
+        "-+-".join("-" * width for width in widths),
+    ]
+    lines.extend(
+        " | ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
+        for row in cleaned
+    )
+    return "\n".join(lines)
+
+
+def _append_warnings(output: str, result: dict[str, Any]) -> str:
+    warnings = result.get("warnings", [])
+    if not isinstance(warnings, list) or not warnings:
+        return output
+    return output + "\n\nWarning: " + " ".join(_clean_cell(item) for item in warnings)
+
+
+def render_terminal_result(command: str, result: dict[str, Any]) -> str:
+    term = result.get("term") or "all terms"
+    if command == "enrolled":
+        units = result.get("learningUnits", [])
+        if not units:
+            if result.get("term"):
+                qualifier = "" if result.get("complete", True) else " confirmed"
+                output = (
+                    f"No{qualifier} active learning units tagged as offered in {term}."
+                )
+            else:
+                qualifier = "" if result.get("complete", True) else " confirmed"
+                output = f"No{qualifier} active learning units found."
+            return _append_warnings(output, result)
+        rows = []
+        for unit in units:
+            explicit = ", ".join(
+                module.get("code") or module.get("name") or "unknown"
+                for module in unit.get("explicitModuleAssociations", [])
+            )
+            advertised = ", ".join(unit.get("titleOnlyModuleCodes", []))
+            rows.append([unit.get("name"), explicit, advertised, unit.get("status")])
+        table = _render_table(
+            ["Learning unit", "Explicit associations", "Title-only codes", "Status"],
+            rows,
+        )
+        heading = (
+            f"Current learning units tagged as offered in {term}:"
+            if result.get("term")
+            else "Current active learning units:"
+        )
+        modules_command = f"modules --term {term}" if result.get("term") else "modules"
+        output = (
+            f"{heading}\n\n{table}\n\n"
+            "Explicit associations and title-only codes are not formal elections. "
+            f"Use `{modules_command}` for study-plan elections."
+        )
+        return _append_warnings(output, result)
+    if command == "modules":
+        modules = result.get("modules", [])
+        if not modules:
+            qualifier = "" if result.get("complete", True) else " confirmed"
+            return _append_warnings(
+                f"No{qualifier} formal module elections found for {term}.", result
+            )
+
+        def module_type(value: Any) -> str:
+            if value is True:
+                return "core"
+            if value is False:
+                return "elective"
+            return "unknown"
+
+        rows = [
+            [
+                module.get("code"),
+                module.get("name"),
+                module.get("ectsPoints"),
+                module_type(module.get("isCoreModule")),
+                (
+                    (", ".join(module.get("terms", [])) or "unknown")
+                    + (
+                        " (ambiguous)"
+                        if module.get("termStatus") == "ambiguous"
+                        else ""
+                    )
+                ),
+            ]
+            for module in modules
+        ]
+        output = f"Formal module elections for {term}:\n\n" + _render_table(
+            ["Module", "Name", "ECTS", "Type", "Elected term"], rows
+        )
+        return _append_warnings(output, result)
+    raise FuxamError("Table output is unavailable for this command.")
 
 
 def jwt_claims(token: str) -> dict[str, Any]:
@@ -865,10 +1299,10 @@ class FuxamClient:
         except FuxamError:
             warnings.append("studyPlan unavailable")
         first = as_object(self.bookable(query, 1, 100), "bookable courses")
-        pages = [first]
         page_count = first.get("pageCount", 1)
-        if type(page_count) is not int or not 1 <= page_count <= MAX_EXPLORE_PAGES:
+        if type(page_count) is not int or not 0 <= page_count <= MAX_EXPLORE_PAGES:
             raise FuxamError("Fuxam returned an invalid catalog page count.")
+        pages = [first] if page_count else []
         for page in range(2, page_count + 1):
             pages.append(as_object(self.bookable(query, page, 100), "bookable courses"))
         courses: dict[str, Any] = {}
@@ -893,6 +1327,16 @@ def add_common_page_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--cursor")
     parser.add_argument("--limit", type=bounded_int(1, 1000), default=100)
+
+
+def add_output_format_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--format",
+        choices=("json", "table"),
+        default="json",
+        dest="output_format",
+        help="output structured JSON or a compact terminal table",
+    )
 
 
 def bounded_int(minimum: int, maximum: int):
@@ -924,6 +1368,16 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("context", help="Verify the CODE study context")
     enrolled = commands.add_parser("enrolled", help="List enrolled courses")
     enrolled.add_argument("--search", default="")
+    enrolled.add_argument(
+        "--term",
+        help="filter offering tags by FS26, Fall 2026, SS26, or Spring 2026",
+    )
+    add_output_format_argument(enrolled)
+    modules = commands.add_parser(
+        "modules", help="List formally elected study-plan modules"
+    )
+    modules.add_argument("--term", help="filter formal elections by semester")
+    add_output_format_argument(modules)
     bookable = commands.add_parser(
         "bookable", help="List one page of bookable learning units"
     )
@@ -1017,7 +1471,12 @@ def run(args: argparse.Namespace) -> Any:
         context.pop("moduleCatalogUrl", None)
         return context
     if args.command == "enrolled":
-        return client.enrolled(args.search)
+        enrolled = client.enrolled(args.search)
+        if args.term or args.output_format == "table":
+            return summarize_enrolled(enrolled, args.term)
+        return enrolled
+    if args.command == "modules":
+        return summarize_modules(client.study_plan(None, None), args.term)
     if args.command == "bookable":
         return client.bookable(args.search, args.page, args.per_page)
     if args.command == "explore":
@@ -1066,8 +1525,11 @@ def main() -> int:
     try:
         args = build_parser().parse_args()
         result = run(args)
-        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
-        sys.stdout.write("\n")
+        if getattr(args, "output_format", "json") == "table":
+            sys.stdout.write(render_terminal_result(args.command, result) + "\n")
+        else:
+            json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
         if args.command in {"doctor", "smoke-test"} and not result.get("ok", False):
             return 1
         return 0

@@ -116,6 +116,270 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(fuxam.jwt_claims(token), {"sub": "user", "exp": 2_000_000_000})
 
 
+class TerminalSummaryTests(unittest.TestCase):
+    def test_term_aliases_are_canonicalized(self) -> None:
+        cases = {
+            "FS26": "FS26",
+            "fs 2026": "FS26",
+            "Fall 2026": "FS26",
+            "Fall Semester 2026": "FS26",
+            "SS26": "SS26",
+            "Spring 2026": "SS26",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(fuxam.canonical_term(value), expected)
+        with self.assertRaisesRegex(fuxam.FuxamError, "unambiguous term"):
+            fuxam.canonical_term("2026")
+
+    def test_enrolled_summary_keeps_evidence_separate(self) -> None:
+        payload = {
+            "courses": [
+                {
+                    "id": "private-learning-unit-a",
+                    "name": "Synthetic Bound Unit (SE_99)",
+                    "status": "ACTIVE",
+                    "courseTags": [{"tag": {"name": "Offered in FS26"}}],
+                    "modules": [
+                        {
+                            "id": "private-module-a",
+                            "code": "SE_01",
+                            "name": "SE_01: Synthetic Explicit Module",
+                        }
+                    ],
+                },
+                {
+                    "id": "private-learning-unit-b",
+                    "name": "Synthetic Reading Group (STS_02, STS_03)",
+                    "status": "ACTIVE",
+                    "courseTags": [{"tag": {"name": "Offered in FS26"}}],
+                    "modules": [],
+                },
+                {
+                    "id": "private-learning-unit-c",
+                    "name": "Synthetic Spring Unit (SE_42)",
+                    "status": "ACTIVE",
+                    "courseTags": [{"tag": {"name": "Offered in SS26"}}],
+                    "modules": [],
+                },
+                {
+                    "id": "private-learning-unit-d",
+                    "name": "Synthetic Inactive Unit (SE_77)",
+                    "status": "ARCHIVED",
+                    "courseTags": [{"tag": {"name": "Offered in FS26"}}],
+                    "modules": [],
+                },
+            ]
+        }
+
+        summary = fuxam.summarize_enrolled(payload, "Fall 2026")
+
+        self.assertEqual(summary["term"], "FS26")
+        self.assertEqual(summary["total"], 2)
+        bound, advertised = summary["learningUnits"]
+        self.assertEqual(
+            bound["explicitModuleAssociations"],
+            [{"code": "SE_01", "name": "SE_01: Synthetic Explicit Module"}],
+        )
+        self.assertEqual(bound["titleOnlyModuleCodes"], ["SE_99"])
+        self.assertEqual(advertised["explicitModuleAssociations"], [])
+        self.assertEqual(advertised["titleOnlyModuleCodes"], ["STS_02", "STS_03"])
+        serialized = json.dumps(summary)
+        self.assertNotIn("private-learning-unit", serialized)
+        self.assertNotIn("private-module", serialized)
+
+    def test_modules_summary_filters_formal_elections_by_term(self) -> None:
+        def item(
+            code: str,
+            *,
+            elected: bool,
+            term: str | None = None,
+            term_ids: list[str] | None = None,
+        ) -> dict[str, object]:
+            return {
+                "isElected": elected,
+                "electedTermIds": term_ids or [],
+                "organizationTermName": term,
+                "isCoreModule": code == "SE_01",
+                "moduleVersion": {
+                    "name": f"{code}: Synthetic Version",
+                    "ectsPoints": 5,
+                    "courseModule": {"name": f"{code}: Synthetic Module"},
+                },
+            }
+
+        payload = {
+            "availableTerms": [
+                {"id": "term-fs26", "name": "Fall Semester 2026"},
+                {"id": "term-ss26", "name": "Spring Semester 2026"},
+            ],
+            "electiveGroups": [
+                {
+                    "availableStudyPlanItems": [
+                        item("SE_01", elected=True, term="Fall Semester 2026"),
+                        item("SE_02", elected=False, term="Fall Semester 2026"),
+                        item("SE_03", elected=True, term="Spring Semester 2026"),
+                        item("PM_24/BM_24", elected=True, term_ids=["term-fs26"]),
+                        item("SE_05", elected=True, term_ids=["unknown-term"]),
+                    ]
+                }
+            ],
+        }
+
+        summary = fuxam.summarize_modules(payload, "FS26")
+
+        self.assertEqual(summary["term"], "FS26")
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(
+            [module["code"] for module in summary["modules"]],
+            ["PM_24/BM_24", "SE_01"],
+        )
+        self.assertEqual(summary["modules"][0]["codes"], ["PM_24", "BM_24"])
+        self.assertTrue(all(module["formalElection"] for module in summary["modules"]))
+        self.assertEqual(summary["unresolvedTermRecords"], 1)
+        self.assertFalse(summary["complete"])
+
+    def test_modules_do_not_confirm_ambiguous_or_unreadable_elections(self) -> None:
+        def version(code: str) -> dict[str, object]:
+            return {
+                "name": f"{code}: Synthetic Version",
+                "ectsPoints": 5,
+                "courseModule": {"name": f"{code}: Synthetic Module"},
+            }
+
+        payload = {
+            "availableTerms": [
+                {"id": "term-fs26", "name": "Fall Semester 2026"},
+                {"id": "term-ss26", "name": "Spring Semester 2026"},
+            ],
+            "electiveGroups": [
+                {
+                    "availableStudyPlanItems": [
+                        {
+                            "isElected": True,
+                            "organizationTermName": "Fall Semester 2026",
+                            "organizationTerm": {"name": "Spring Semester 2026"},
+                            "electedTermIds": ["term-fs26", "term-ss26"],
+                            "moduleVersion": version("SE_06"),
+                        },
+                        {
+                            "isElected": True,
+                            "electedTermIds": ["unknown-term"],
+                            "moduleVersion": version("SE_07"),
+                        },
+                        {
+                            "isElected": True,
+                            "organizationTermName": "Fall Semester 2026",
+                            "electedTermIds": [],
+                            "moduleVersion": None,
+                        },
+                    ]
+                }
+            ],
+        }
+
+        summary = fuxam.summarize_modules(payload, "FS26")
+
+        self.assertEqual(summary["total"], 0)
+        self.assertEqual(summary["unresolvedTermRecords"], 2)
+        self.assertEqual(summary["unreadableElectionRecords"], 1)
+        self.assertFalse(summary["complete"])
+        output = fuxam.render_terminal_result("modules", summary)
+        self.assertIn("No confirmed formal module elections", output)
+        self.assertIn("Warning:", output)
+        self.assertIn("conflicting term sources", output)
+
+    def test_enrolled_schema_drift_is_reported(self) -> None:
+        payload = {
+            "courses": [
+                "unsupported",
+                {"status": "ACTIVE", "name": None},
+                {
+                    "status": "ACTIVE",
+                    "name": "Synthetic Unit",
+                    "courseTags": "unsupported",
+                    "modules": "unsupported",
+                },
+            ]
+        }
+
+        summary = fuxam.summarize_enrolled(payload)
+
+        self.assertEqual(summary["total"], 1)
+        self.assertFalse(summary["complete"])
+        self.assertTrue(summary["warnings"])
+        output = fuxam.render_terminal_result("enrolled", summary)
+        self.assertIn("results may be incomplete", output)
+
+    def test_terminal_tables_are_clear_and_sanitize_cells(self) -> None:
+        enrolled = {
+            "term": "FS26",
+            "total": 1,
+            "learningUnits": [
+                {
+                    "name": "Synthetic\nUnit\tName",
+                    "status": "ACTIVE",
+                    "offeringTerms": ["FS26"],
+                    "explicitModuleAssociations": [
+                        {"code": "SE_01", "name": "Synthetic"}
+                    ],
+                    "titleOnlyModuleCodes": ["SE_02"],
+                }
+            ],
+        }
+
+        table = fuxam.render_terminal_result("enrolled", enrolled)
+
+        self.assertIn("Learning unit", table)
+        self.assertIn("Explicit associations", table)
+        self.assertIn("Title-only codes", table)
+        self.assertIn("Synthetic Unit Name", table)
+        self.assertNotIn("Synthetic\nUnit", table)
+        self.assertIn("not formal elections", table)
+
+        hostile = fuxam._clean_cell("Course\x1b]52;c;SECRET\x07\u0085\u202e|Name")
+        for control in ("\x1b", "\x07", "\u0085", "\u202e", "|"):
+            self.assertNotIn(control, hostile)
+        self.assertIn("¦", hostile)
+
+        empty = fuxam.render_terminal_result(
+            "modules", {"term": "FS26", "total": 0, "modules": []}
+        )
+        self.assertIn("No formal module elections found for FS26.", empty)
+
+        all_terms = fuxam.render_terminal_result(
+            "enrolled",
+            {"term": None, "total": 1, "learningUnits": enrolled["learningUnits"]},
+        )
+        self.assertIn("Current active learning units:", all_terms)
+        self.assertIn("Use `modules`", all_terms)
+        self.assertNotIn("--term all terms", all_terms)
+
+    def test_enrolled_without_summary_options_returns_raw_payload(self) -> None:
+        payload = {"courses": [{"private": "unchanged"}], "total": 1}
+        client = mock.Mock()
+        client.enrolled.return_value = payload
+        args = fuxam.build_parser().parse_args(["enrolled"])
+
+        with mock.patch.object(fuxam, "FuxamClient", return_value=client):
+            result = fuxam.run(args)
+
+        self.assertIs(result, payload)
+        client.enrolled.assert_called_once_with("")
+
+    def test_enrolled_and_modules_expose_json_or_table_formats(self) -> None:
+        parser = fuxam.build_parser()
+        enrolled = parser.parse_args(
+            ["enrolled", "--term", "Fall 2026", "--format", "table"]
+        )
+        modules = parser.parse_args(["modules", "--term", "FS26", "--format", "json"])
+
+        self.assertEqual(enrolled.term, "Fall 2026")
+        self.assertEqual(enrolled.output_format, "table")
+        self.assertEqual(modules.term, "FS26")
+        self.assertEqual(modules.output_format, "json")
+
+
 class CredentialAndNetworkTests(unittest.TestCase):
     def test_cookie_normalization_accepts_value_or_cookie_prefix(self) -> None:
         self.assertEqual(fuxam.normalize_client_cookie("abc_DEF-123"), "abc_DEF-123")
@@ -277,18 +541,43 @@ class ReadOnlyContractTests(unittest.TestCase):
         ]
         action.assert_called_once_with("checkCourseConflictsAction", expected)
 
-    def test_catalog_page_count_is_bounded(self) -> None:
+    def test_explore_accepts_zero_page_count_as_an_empty_result(self) -> None:
         client = fuxam.FuxamClient()
         with (
             mock.patch.object(client, "study_plan", return_value={}),
             mock.patch.object(
                 client,
                 "bookable",
-                return_value={"pageCount": fuxam.MAX_EXPLORE_PAGES + 1},
-            ),
-            self.assertRaisesRegex(fuxam.FuxamError, "page count"),
+                return_value={"pageCount": 0, "totalCount": 0, "courses": []},
+            ) as bookable,
         ):
-            client.explore("")
+            result = client.explore("no matches")
+
+        self.assertEqual(result["learningUnits"], [])
+        bookable.assert_called_once_with("no matches", 1, 100)
+
+    def test_catalog_page_count_is_bounded(self) -> None:
+        client = fuxam.FuxamClient()
+        bad_values = (
+            -1,
+            fuxam.MAX_EXPLORE_PAGES + 1,
+            "0",
+            0.0,
+            True,
+            None,
+        )
+        for page_count in bad_values:
+            with (
+                self.subTest(page_count=page_count),
+                mock.patch.object(client, "study_plan", return_value={}),
+                mock.patch.object(
+                    client,
+                    "bookable",
+                    return_value={"pageCount": page_count},
+                ),
+                self.assertRaisesRegex(fuxam.FuxamError, "page count"),
+            ):
+                client.explore("")
 
     def test_cli_exposes_no_account_mutation_commands(self) -> None:
         parser = fuxam.build_parser()
@@ -475,6 +764,7 @@ class SkillMetadataTests(unittest.TestCase):
             "sys",
             "time",
             "typing",
+            "unicodedata",
             "urllib",
         }
         self.assertEqual(imports - allowed, set())
