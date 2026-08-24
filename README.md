@@ -77,7 +77,8 @@ The smoke report contains only pass/fail results and broad response types—not 
 In Codex:
 
 ```text
-Use $fuxam-local to show my active learning units and formal module elections for Fall 2026.
+Use $fuxam-local to show my formal module elections for Fall 2026.
+Use $fuxam-local to check my concrete progress for SE_08.
 Use $fuxam-local to summarize my deadlines next month.
 Use $fuxam-local to check these courses for schedule conflicts.
 ```
@@ -97,7 +98,9 @@ FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
 "$FUXAM" agenda --limit 25
 ```
 
-`enrolled --term` lists active learning units carrying that offering tag. `modules` lists formal elections from the study plan. The output keeps explicit learning-unit/module associations separate from codes that appear only in a title.
+`modules --term` lists formal elections recorded in the study plan. `enrolled --term` is narrower than its name may suggest: it lists `ACTIVE` learning-unit records that also carry the requested catalog offering tag. That overlap does not prove you enrolled in, are taking, or still need those units in that term. `ACTIVE` records can remain after completion.
+
+The output keeps explicit learning-unit/module associations separate from codes that appear only in a title. Use concrete module attempts to verify progress; the absence of an attempt is not proof that a module is incomplete.
 
 The CLI is intentionally read-only. Adding, electing, booking, or dropping modules still requires Fuxam's official UI.
 
@@ -123,7 +126,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full maintainer checks.
 
 ## Limits
 
-Fuxam has no supported public API for this project, so a Fuxam update may break the client. Run the smoke test when something looks wrong, and always verify important information in Fuxam itself.
+Fuxam has no supported public API for this project, so a Fuxam update may break the client. Its learning-unit records also do not expose a reliable term-enrollment date, so offering tags cannot reconstruct your semester workload. Run the smoke test when something looks wrong, and always verify important information in Fuxam itself.
 
 ## License
 

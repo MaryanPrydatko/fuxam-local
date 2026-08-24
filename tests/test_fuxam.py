@@ -188,6 +188,114 @@ class TerminalSummaryTests(unittest.TestCase):
         self.assertNotIn("private-learning-unit", serialized)
         self.assertNotIn("private-module", serialized)
 
+    def test_enrolled_cli_labels_term_match_without_claiming_workload(self) -> None:
+        payload = {
+            "courses": [
+                {
+                    "name": "Clean Code (SE_08)",
+                    "status": "ACTIVE",
+                    "courseTags": [{"tag": {"name": "Offered in FS26"}}],
+                    "modules": [],
+                }
+            ]
+        }
+
+        def invoke(output_format: str) -> tuple[int, str, str]:
+            client = mock.Mock()
+            client.enrolled.return_value = payload
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            argv = [
+                str(SCRIPT),
+                "enrolled",
+                "--term",
+                "Fall 2026",
+                "--format",
+                output_format,
+            ]
+            with (
+                mock.patch.object(fuxam, "FuxamClient", return_value=client),
+                mock.patch.object(fuxam.sys, "argv", argv),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = fuxam.main()
+            return code, stdout.getvalue(), stderr.getvalue()
+
+        json_code, json_output, json_error = invoke("json")
+        result = json.loads(json_output)
+        self.assertEqual(json_code, 0)
+        self.assertEqual(json_error, "")
+        self.assertEqual(result["kind"], "active-learning-unit-offering-matches")
+        self.assertEqual(result["termEnrollmentStatus"], "unknown")
+        self.assertEqual(result["currentWorkloadStatus"], "unknown")
+        self.assertFalse(result["progressChecked"])
+        self.assertEqual(
+            result["confirmedClaims"],
+            [
+                "learning-unit record is ACTIVE",
+                "catalog offering tag matches FS26",
+            ],
+        )
+        self.assertEqual(
+            result["unconfirmedClaims"],
+            [
+                "enrolled in FS26",
+                "taking in FS26",
+                "needed in FS26",
+                "not previously completed",
+            ],
+        )
+        self.assertEqual(
+            result["learningUnits"][0]["termRelationship"],
+            "offering-tag-match-only",
+        )
+        self.assertNotEqual(result["kind"], "active-learning-unit-enrollments")
+        self.assertNotIn("enrollment", result["evidence"])
+        self.assertEqual(
+            result["evidence"]["recordStatus"],
+            "Fuxam reports ACTIVE; this can persist after completion",
+        )
+
+        table_code, table_output, table_error = invoke("table")
+        self.assertEqual(table_code, 0)
+        self.assertEqual(table_error, "")
+        self.assertIn("Clean Code (SE_08)", table_output)
+        self.assertIn(
+            "An offering tag only shows availability; term enrollment and current "
+            "workload are unknown.",
+            table_output,
+        )
+        self.assertNotIn("Current learning units tagged as offered", table_output)
+
+    def test_empty_term_match_makes_no_affirmative_record_claims(self) -> None:
+        client = mock.Mock()
+        client.enrolled.return_value = {"courses": []}
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = [
+            str(SCRIPT),
+            "enrolled",
+            "--term",
+            "FS26",
+            "--format",
+            "json",
+        ]
+
+        with (
+            mock.patch.object(fuxam, "FuxamClient", return_value=client),
+            mock.patch.object(fuxam.sys, "argv", argv),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = fuxam.main()
+
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["confirmedClaims"], [])
+
     def test_modules_summary_filters_formal_elections_by_term(self) -> None:
         def item(
             code: str,
@@ -351,7 +459,8 @@ class TerminalSummaryTests(unittest.TestCase):
             "enrolled",
             {"term": None, "total": 1, "learningUnits": enrolled["learningUnits"]},
         )
-        self.assertIn("Current active learning units:", all_terms)
+        self.assertIn("ACTIVE learning-unit records:", all_terms)
+        self.assertIn("not proof of unfinished work", all_terms)
         self.assertIn("Use `modules`", all_terms)
         self.assertNotIn("--term all terms", all_terms)
 
