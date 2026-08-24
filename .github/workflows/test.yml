@@ -32,5 +32,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install ruff==0.12.11
+      - run: python -m pip install skills-ref==0.1.1
       - run: ruff check .
       - run: ruff format --check .
+      - run: agentskills validate .agents/skills/fuxam-local

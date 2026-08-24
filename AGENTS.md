@@ -13,4 +13,5 @@ python3 -m compileall -q .agents/skills/fuxam-local/scripts
 python3 -m unittest discover -s tests -v
 uvx ruff check .
 uvx ruff format --check .
+uvx --from skills-ref==0.1.1 agentskills validate .agents/skills/fuxam-local
 ```

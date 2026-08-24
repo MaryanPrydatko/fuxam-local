@@ -19,7 +19,8 @@ from typing import Any
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-USER_AGENT = "fuxam-local/0.1.0"
+VERSION = "0.2.0"
+USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
 NOT_FOUND = -25300
@@ -40,6 +41,137 @@ READ_ONLY_ACTIONS = frozenset(
 
 class FuxamError(RuntimeError):
     pass
+
+
+def doctor_status() -> dict[str, Any]:
+    """Report local readiness without contacting Fuxam or exposing credentials."""
+    python_supported = sys.version_info >= (3, 10)
+    platform_supported = sys.platform == "darwin"
+    configured: bool | None = None
+    keychain_failed = False
+    if platform_supported:
+        try:
+            configured = Keychain().get() is not None
+        except (FuxamError, OSError, UnicodeError):
+            keychain_failed = True
+
+    result: dict[str, Any] = {
+        "ok": (
+            python_supported
+            and platform_supported
+            and configured is True
+            and not keychain_failed
+        ),
+        "version": VERSION,
+        "python": {
+            "version": ".".join(str(part) for part in sys.version_info[:3]),
+            "supported": python_supported,
+        },
+        "platform": {"name": sys.platform, "supported": platform_supported},
+        "credential": {
+            "storage": "macOS Keychain",
+            "configured": configured,
+        },
+        "network": {
+            "tested": False,
+            "allowedOrigins": [BASE_URL, CLERK_URL],
+        },
+        "access": "read-only",
+        "telemetry": False,
+    }
+    if keychain_failed:
+        result["keychainError"] = "KEYCHAIN_CHECK_FAILED"
+    return result
+
+
+def validate_smoke_response(
+    value: Any,
+    *,
+    require_object: bool = False,
+    required_fields: tuple[str, ...] = (),
+    any_field: tuple[str, ...] = (),
+) -> str:
+    if require_object:
+        if not isinstance(value, dict):
+            raise FuxamError("Smoke response was not an object.")
+    elif not isinstance(value, (dict, list)):
+        raise FuxamError("Smoke response was not structured data.")
+    if isinstance(value, dict):
+        if "error" in value:
+            raise FuxamError("Smoke response contained an error envelope.")
+        if any(
+            not isinstance(value.get(field), str) or not value[field]
+            for field in required_fields
+        ):
+            raise FuxamError("Smoke response omitted required fields.")
+        if any_field and not any(field in value for field in any_field):
+            raise FuxamError("Smoke response omitted its expected payload fields.")
+    return "object" if isinstance(value, dict) else "array"
+
+
+def smoke_test(client: FuxamClient, *, deep: bool = False) -> dict[str, Any]:
+    """Exercise live read-only paths while returning metadata only."""
+    checks: list[tuple[str, Any, Any]] = [
+        (
+            "context",
+            client.context,
+            lambda value: validate_smoke_response(
+                value,
+                require_object=True,
+                required_fields=(
+                    "userId",
+                    "cohortId",
+                    "studyProgramVersionId",
+                ),
+            ),
+        ),
+        ("enrolled", lambda: client.enrolled(""), validate_smoke_response),
+        (
+            "study-plan",
+            lambda: client.study_plan(None, None),
+            validate_smoke_response,
+        ),
+        (
+            "agenda",
+            lambda: client.agenda("initial", None, 1, False),
+            validate_smoke_response,
+        ),
+    ]
+    if deep:
+        checks.append(
+            (
+                "bookable-server-action",
+                lambda: client.bookable("", 1, 1),
+                lambda value: validate_smoke_response(
+                    value,
+                    require_object=True,
+                    any_field=("courses", "learningUnits", "pageCount"),
+                ),
+            )
+        )
+
+    reports: list[dict[str, Any]] = []
+    for name, check, validate in checks:
+        try:
+            value = check()
+            response_type = validate(value)
+            reports.append({"name": name, "ok": True, "shape": {"type": response_type}})
+        except (FuxamError, json.JSONDecodeError):
+            reports.append({"name": name, "ok": False, "error": "FUXAM_CHECK_FAILED"})
+        except Exception:
+            reports.append(
+                {
+                    "name": name,
+                    "ok": False,
+                    "error": "LOCAL_CHECK_FAILED",
+                }
+            )
+    return {
+        "ok": all(report["ok"] for report in reports),
+        "mode": "deep" if deep else "quick",
+        "privacy": "No academic records are included in this report.",
+        "checks": reports,
+    }
 
 
 def origin(url: str) -> tuple[str, str, int]:
@@ -342,9 +474,7 @@ class FuxamClient:
                     require_context=require_context,
                     retry=False,
                 )
-            raise FuxamError(
-                f"Fuxam request failed with HTTP {exc.code} at {urllib.parse.urlsplit(url).path}."
-            ) from exc
+            raise FuxamError(f"Fuxam request failed with HTTP {exc.code}.") from exc
         except urllib.error.URLError as exc:
             raise FuxamError("Could not reach Fuxam.") from exc
 
@@ -780,6 +910,15 @@ def bounded_int(minimum: int, maximum: int):
 def build_parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("doctor", help="Check local readiness without contacting Fuxam")
+    smoke = commands.add_parser(
+        "smoke-test", help="Run live read-only checks without returning academic data"
+    )
+    smoke.add_argument(
+        "--deep",
+        action="store_true",
+        help="also verify the frontend-backed bookable-course action",
+    )
     auth = commands.add_parser("auth", help="Manage the local Keychain credential")
     auth.add_argument("operation", choices=("set", "status", "clear"))
     commands.add_parser("context", help="Verify the CODE study context")
@@ -851,6 +990,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> Any:
+    if args.command == "doctor":
+        return doctor_status()
+
     if args.command == "auth":
         keychain = Keychain()
         if args.operation == "status":
@@ -867,6 +1009,8 @@ def run(args: argparse.Namespace) -> Any:
         return {"configured": True, "storage": "macOS Keychain"}
 
     client = FuxamClient()
+    if args.command == "smoke-test":
+        return smoke_test(client, deep=args.deep)
     if args.command == "context":
         context = client.context().copy()
         context.pop("dashboardUrl", None)
@@ -920,9 +1064,12 @@ def run(args: argparse.Namespace) -> Any:
 
 def main() -> int:
     try:
-        result = run(build_parser().parse_args())
+        args = build_parser().parse_args()
+        result = run(args)
         json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
+        if args.command in {"doctor", "smoke-test"} and not result.get("ok", False):
+            return 1
         return 0
     except (FuxamError, json.JSONDecodeError) as exc:
         json.dump({"error": str(exc)}, sys.stderr, ensure_ascii=False)

@@ -14,6 +14,7 @@ Before submitting a change:
    python3 -m unittest discover -s tests -v
    uvx ruff check .
    uvx ruff format --check .
+   uvx --from skills-ref==0.1.1 agentskills validate .agents/skills/fuxam-local
    ```
 
 When Fuxam changes, explain the observed protocol behavior without attaching private responses. Keep commits focused, and document non-obvious security decisions in the code or pull request.

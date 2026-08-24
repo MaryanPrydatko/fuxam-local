@@ -7,7 +7,7 @@ Fuxam Local renews short-lived Fuxam session tokens from Clerk's `__client` cook
 - Enter it only through `fuxam.py auth set`, which uses a hidden terminal prompt.
 - Never put it in chat, source, issues, screenshots, shell arguments, or environment variables.
 - The value is stored in macOS Keychain under service `codex-fuxam-local` and account `__client`.
-- Clear it with `python3 "$HOME/.codex/skills/fuxam-local/scripts/fuxam.py" auth clear`.
+- Clear it with `python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" auth clear`.
 
 If a credential may have been exposed, clear it, sign out of Fuxam/Clerk sessions, and authenticate again with a fresh cookie.
 
@@ -24,7 +24,7 @@ If a credential may have been exposed, clear it, sign out of Fuxam/Clerk session
 
 - Fuxam's private web API can change without notice.
 - Python strings cannot be reliably zeroized from process memory.
-- Academic results returned to Codex are subject to the Codex client's data controls.
+- Academic results returned to an agent are subject to that agent client's data controls.
 - This project cannot verify Fuxam's own server-side security or authorization behavior.
 
 ## Reporting a vulnerability
