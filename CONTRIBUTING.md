@@ -12,8 +12,9 @@ Before submitting a change:
    ```sh
    python3 -m compileall -q .agents/skills/fuxam-local/scripts
    python3 -m unittest discover -s tests -v
-   uvx ruff check .
-   uvx ruff format --check .
+   uvx ruff==0.12.11 check .
+   uvx ruff==0.12.11 format --check .
+   uvx --from skills-ref==0.1.1 agentskills validate .agents/skills/fuxam-local
    ```
 
 When Fuxam changes, explain the observed protocol behavior without attaching private responses. Keep commits focused, and document non-obvious security decisions in the code or pull request.
