@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-08-24
+
+- Stopped presenting `ACTIVE` learning-unit records with a matching offering tag as term enrollment or current workload.
+- Marked term enrollment, workload, and completion as unknown in offering-overlap results.
+- Tightened the skill's evidence rules for formal elections, learning-unit records, and concrete progress.
+
 ## 0.3.0 — 2026-08-24
 
 - Added term-filtered learning-unit summaries with compact terminal tables.

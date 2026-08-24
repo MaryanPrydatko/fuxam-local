@@ -20,7 +20,7 @@ from typing import Any
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
@@ -471,6 +471,13 @@ def summarize_enrolled(value: Any, term: str | None = None) -> dict[str, Any]:
                 "name": name,
                 "status": status,
                 "offeringTerms": offering_terms,
+                "termRelationship": (
+                    "offering-tag-match-only" if target else "not-filtered-by-term"
+                ),
+                "termEnrollmentStatus": "unknown",
+                "currentWorkloadStatus": "unknown",
+                "completionStatus": "not-checked",
+                "progressChecked": False,
                 "explicitModuleAssociations": explicit,
                 "titleOnlyModuleCodes": title_only,
             }
@@ -483,15 +490,42 @@ def summarize_enrolled(value: Any, term: str | None = None) -> dict[str, Any]:
             "results may be incomplete."
         )
     return {
-        "kind": "active-learning-unit-enrollments",
+        "kind": (
+            "active-learning-unit-offering-matches"
+            if target
+            else "active-learning-unit-records"
+        ),
         "term": target,
         "total": len(learning_units),
         "learningUnits": learning_units,
+        "termEnrollmentStatus": "unknown",
+        "currentWorkloadStatus": "unknown",
+        "completionStatus": "not-checked",
+        "progressChecked": False,
+        "confirmedClaims": (
+            [
+                "learning-unit record is ACTIVE",
+                *([f"catalog offering tag matches {target}"] if target else []),
+            ]
+            if learning_units
+            else []
+        ),
+        "unconfirmedClaims": (
+            [
+                f"enrolled in {target}",
+                f"taking in {target}",
+                f"needed in {target}",
+                "not previously completed",
+            ]
+            if target
+            else ["current workload", "still needed", "not previously completed"]
+        ),
         "complete": not schema_issues,
         "warnings": warnings,
         "evidence": {
-            "enrollment": "current learning-unit enrollment",
-            "term": "offering tag only",
+            "recordStatus": "Fuxam reports ACTIVE; this can persist after completion",
+            "term": "catalog offering tag only",
+            "completion": "not checked",
             "explicitModuleAssociations": "learning-unit association, not election",
             "titleOnlyModuleCodes": "title mention only",
         },
@@ -710,11 +744,13 @@ def render_terminal_result(command: str, result: dict[str, Any]) -> str:
             if result.get("term"):
                 qualifier = "" if result.get("complete", True) else " confirmed"
                 output = (
-                    f"No{qualifier} active learning units tagged as offered in {term}."
+                    f"No{qualifier} ACTIVE learning-unit records carry an {term} "
+                    "offering tag. This does not establish term enrollment or "
+                    "current workload."
                 )
             else:
                 qualifier = "" if result.get("complete", True) else " confirmed"
-                output = f"No{qualifier} active learning units found."
+                output = f"No{qualifier} ACTIVE learning-unit records found."
             return _append_warnings(output, result)
         rows = []
         for unit in units:
@@ -729,13 +765,19 @@ def render_terminal_result(command: str, result: dict[str, Any]) -> str:
             rows,
         )
         heading = (
-            f"Current learning units tagged as offered in {term}:"
+            f"ACTIVE learning-unit records with an {term} offering tag:"
             if result.get("term")
-            else "Current active learning units:"
+            else "ACTIVE learning-unit records:"
         )
         modules_command = f"modules --term {term}" if result.get("term") else "modules"
-        output = (
-            f"{heading}\n\n{table}\n\n"
+        caveat = (
+            "An offering tag only shows availability; term enrollment and current "
+            "workload are unknown. ACTIVE records may persist after completion.\n\n"
+            if result.get("term")
+            else "ACTIVE is a record status, not proof of unfinished work.\n\n"
+        )
+        output = f"{heading}\n\n{caveat}{table}\n\n"
+        output += (
             "Explicit associations and title-only codes are not formal elections. "
             f"Use `{modules_command}` for study-plan elections."
         )
@@ -1366,11 +1408,16 @@ def build_parser() -> argparse.ArgumentParser:
     auth = commands.add_parser("auth", help="Manage the local Keychain credential")
     auth.add_argument("operation", choices=("set", "status", "clear"))
     commands.add_parser("context", help="Verify the CODE study context")
-    enrolled = commands.add_parser("enrolled", help="List enrolled courses")
+    enrolled = commands.add_parser(
+        "enrolled", help="List raw records or inspect ACTIVE/offering-tag overlap"
+    )
     enrolled.add_argument("--search", default="")
     enrolled.add_argument(
         "--term",
-        help="filter offering tags by FS26, Fall 2026, SS26, or Spring 2026",
+        help=(
+            "match catalog offering tags only; this does not prove term enrollment "
+            "or workload"
+        ),
     )
     add_output_format_argument(enrolled)
     modules = commands.add_parser(

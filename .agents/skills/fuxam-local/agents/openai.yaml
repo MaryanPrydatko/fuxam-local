@@ -1,4 +1,4 @@
 interface:
   display_name: "Fuxam Local"
   short_description: "Private local access to your Fuxam study data"
-  default_prompt: "Use $fuxam-local to show my current modules and learning units."
+  default_prompt: "Use $fuxam-local to inspect my module elections and learning-unit records without treating offering tags as workload."
