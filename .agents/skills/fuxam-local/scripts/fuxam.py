@@ -94,7 +94,7 @@ def validate_smoke_response(
     if require_object:
         if not isinstance(value, dict):
             raise FuxamError("Smoke response was not an object.")
-    elif not isinstance(value, (dict, list)):
+    elif not isinstance(value, dict | list):
         raise FuxamError("Smoke response was not structured data.")
     if isinstance(value, dict):
         if "error" in value:

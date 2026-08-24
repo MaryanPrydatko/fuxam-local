@@ -100,8 +100,8 @@ python3 -m unittest discover -s tests -v
 Repository maintainers should also run the pinned lint and portability checks. `uvx` may download these tools from PyPI when they are not already cached:
 
 ```sh
-uvx ruff check .
-uvx ruff format --check .
+uvx ruff==0.12.11 check .
+uvx ruff==0.12.11 format --check .
 uvx --from skills-ref==0.1.1 agentskills validate .agents/skills/fuxam-local
 ```
 
