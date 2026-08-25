@@ -1,51 +1,81 @@
-# Fuxam Local
+<h1 align="center">Fuxam Local</h1>
 
-Use Fuxam from Codex, Claude, another local agent, or your terminal.
+<p align="center"><strong>Use Fuxam from Codex, Claude Code, any shell-capable agent, or your terminal.</strong></p>
 
-Fuxam Local is open source and runs locally on your Mac while talking directly to Fuxam. It reads your study data and can safely preview or apply learning-unit enrollment and waitlist changes. There is no MCP server, telemetry, hosted middleman, or runtime package to install.
+<p align="center"><code>open source</code> · <code>local-first</code> · <code>no MCP</code> · <code>no telemetry</code> · <code>standard library only</code></p>
 
-It can inspect modules, learning units, progress, study plans, appointments, deadlines, exams, todos, and schedule conflicts. Four account changes are supported: enroll, unenroll, join a waitlist, and leave a waitlist.
+Fuxam Local is an Agent Skill and a small Python CLI for CODE University students. It reads study data directly from Fuxam and can safely manage active-term learning-unit enrollment and waitlists.
 
+[**Latest release**](https://github.com/MaryanPrydatko/fuxam-local/releases/latest) · **macOS** · **Python 3.10+** · **MIT**
+
+> [!IMPORTANT]
 > This is an unofficial student project. It is not affiliated with CODE University, Fuxam, Clerk, or CodeCampus. Fuxam remains the source of truth.
 
-## Why a skill instead of MCP?
+## At a glance
 
-A skill is enough here. It tells the agent when to run a normal Python command, and that command exits when it is done. No daemon, protocol handshake, or permanent tool catalog is needed.
+| | Fuxam Local |
+| --- | --- |
+| **Reads** | Modules, learning units, progress, study plans, appointments, deadlines, exams, todos, and conflicts |
+| **Changes** | Enroll, unenroll, join a waitlist, and leave a waitlist for the active term |
+| **Runs** | Locally, as one short-lived Python process |
+| **Stores** | One Clerk cookie in macOS Keychain |
+| **Connects to** | `clerk.fuxam.app` and `fuxam.app` over HTTPS |
+| **Does not include** | MCP, a daemon, telemetry, a hosted middleman, or third-party runtime packages |
 
-Agents that do not support skills can still run the same CLI directly.
+## How it works
 
-## Requirements
+```mermaid
+flowchart LR
+    A["You"] --> B["Codex, Claude Code,<br/>or a shell-capable agent"]
+    A --> T["Terminal"]
+    B --> C["Fuxam Local skill"]
+    C --> D["Local Python CLI"]
+    T --> D
+    D --> E[("macOS Keychain")]
+    D -->|"HTTPS"| F["Clerk"]
+    D -->|"HTTPS"| G["Fuxam"]
+```
 
-- macOS with an unlocked login Keychain
-- Python 3.10 or newer
-- a CODE University Fuxam account
+The skill tells an agent when and how to run the CLI. The CLI contacts Fuxam directly and exits when the command finishes. Nothing runs in the background.
 
-## Install
+## Quick start
 
-Clone or download this repository, then run:
+You need macOS with an unlocked login Keychain, Python 3.10 or newer, and a CODE University Fuxam account.
+
+### 1. Install
 
 ```sh
+git clone https://github.com/MaryanPrydatko/fuxam-local.git
+cd fuxam-local
 python3 install.py
 ```
 
-Updating an existing installation:
+The installer creates one shared copy and two aliases:
+
+```text
+~/
+├── .agents/skills/fuxam-local        ← canonical copy
+├── .codex/skills/fuxam-local         → canonical copy
+└── .claude/skills/fuxam-local        → canonical copy
+```
+
+To update an existing installation:
 
 ```sh
+git pull --ff-only
 python3 install.py --replace
 ```
 
-The installer keeps one shared copy in `~/.agents/skills/fuxam-local` and makes it available to Codex and Claude. Existing copies are backed up before replacement.
-Backups live in `~/.agents/backups/fuxam-local`, outside directories that agents scan for skills.
+Existing installations are backed up to `~/.agents/backups/fuxam-local`, outside directories that agents scan for skills. Start a new Codex or Claude Code session after installing or updating.
 
-Start a new Codex or Claude session after installing. Any other local agent can call `scripts/fuxam.py` directly.
+### 2. Connect your account
 
-## Connect your account
+> [!CAUTION]
+> Your Clerk `__client` cookie works like a password. Never paste it into a chat, issue, screenshot, command argument, or config file.
 
-Your Clerk `__client` cookie works like a password. Never paste it into a chat, issue, screenshot, command argument, or config file.
-
-1. Sign in at <https://fuxam.app> in Brave or Chrome.
-2. On the Fuxam page, open Developer Tools → Application → Storage → Cookies → `https://clerk.fuxam.app`.
-3. Select the cookie named exactly `__client`—not `__clerk_active_context` or `__cf_bm`—and copy only its Value.
+1. Sign in at <https://fuxam.app> using Brave or Chrome.
+2. Open **Developer Tools → Application → Storage → Cookies → `https://clerk.fuxam.app`**.
+3. Select the cookie named exactly **`__client`**—not `__clerk_active_context` or `__cf_bm`—and copy only its Value.
 4. Run:
 
    ```sh
@@ -54,9 +84,13 @@ Your Clerk `__client` cookie works like a password. Never paste it into a chat, 
 
 5. Paste the value into the hidden prompt, press Return, and clear your clipboard.
 
-The cookie is stored in macOS Keychain. If it expires, repeat these steps. Remove it at any time with `auth clear`.
+The cookie is stored in macOS Keychain. If it expires, repeat these steps. Remove it at any time with:
 
-## Check that it works
+```sh
+python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" auth clear
+```
+
+### 3. Verify
 
 ```sh
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
@@ -66,110 +100,187 @@ python3 "$FUXAM" smoke-test
 python3 "$FUXAM" smoke-test --deep
 ```
 
-- `doctor` checks Python, macOS, Keychain, and whether a credential is configured without contacting Fuxam.
-- `smoke-test` checks the main read-only endpoints.
-- `smoke-test --deep` also checks the active-term page and Fuxam's frontend-backed read action, so it may take longer.
+| Check | What it verifies | Contacts Fuxam? |
+| --- | --- | :---: |
+| `doctor` | Python, macOS, Keychain, and credential presence | No |
+| `smoke-test` | Main read-only endpoints | Yes |
+| `smoke-test --deep` | Active-term parsing and frontend-backed read action | Yes |
 
-The smoke report contains only pass/fail results and broad response types—not your academic records.
+Smoke reports contain only pass/fail results and broad response types—not academic records.
 
-## Use it
+## Use it with an agent
 
-In Codex:
+| Harness | Invocation |
+| --- | --- |
+| **Codex** | `Use $fuxam-local to show my active-term learning units.` |
+| **Claude Code** | `/fuxam-local show my active-term learning units` |
+| **Other agents** | Ask the agent to run the shared CLI at `~/.agents/skills/fuxam-local/scripts/fuxam.py` |
+| **Terminal** | Run the same CLI directly with Python |
+
+Useful prompts:
 
 ```text
-Use $fuxam-local to show my formal module elections for Fall 2026.
-Use $fuxam-local to show my actual active-term learning-unit enrollments.
-Use $fuxam-local to check my concrete progress for SE_08.
-Use $fuxam-local to summarize my deadlines next month.
-Use $fuxam-local to preview enrolling me in this learning unit.
+Show my formal module elections for Fall 2026.
+Show my actual active-term learning-unit enrollments.
+Check my concrete progress for SE_08.
+Summarize my deadlines next month.
+Preview enrolling me in this learning unit.
 ```
 
-In Claude, invoke `/fuxam-local` and ask the same questions.
+When an agent previews a change, it must show you the result and pause for explicit approval before applying it.
 
-Or use the CLI yourself:
+## Terminal quick reference
 
 ```sh
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
 
-"$FUXAM" --help
-"$FUXAM" learning-units --format table
-"$FUXAM" enrolled --term "Fall 2026" --format table
-"$FUXAM" modules --format table
-"$FUXAM" modules --term "Spring 2026" --format table
-"$FUXAM" agenda --limit 25
+python3 "$FUXAM" --help
+python3 "$FUXAM" learning-units --format table
+python3 "$FUXAM" enrolled --term "Fall 2026" --format table
+python3 "$FUXAM" modules --format table
+python3 "$FUXAM" modules --term "Spring 2026" --format table
+python3 "$FUXAM" agenda --limit 25
+python3 "$FUXAM" todos
 ```
 
-`learning-units` is the authoritative view of Fuxam's active term. It separates enrolled, waitlisted, self-study, bookable, and full learning units and includes the exact course IDs used by booking commands.
+### Know which record you are reading
 
-`enrolled --term` lists only confirmed enrollments when the requested term is Fuxam's active term; waitlist entries are shown separately. `enrolled` without `--term` returns older learning-unit records, where `ACTIVE` is only a record status and can remain after completion.
+| Record | What it means | Best command |
+| --- | --- | --- |
+| **Module election** | A formal module selection in the study plan | `modules --term TERM` |
+| **Learning-unit booking** | A current active-term enrollment, waitlist entry, or available unit | `learning-units` or `enrolled --term TERM` |
+| **Module attempt** | Concrete progress such as an exam attempt and published result | `module-attempts MODULE_VERSION_ID` |
+| **Older `ACTIVE` record** | A historical learning-unit record that may remain after completion | `enrolled` without `--term` |
 
-`modules --term` lists formal module elections recorded in the study plan. Module elections and learning-unit bookings are different. Use concrete module attempts to verify progress; the absence of an attempt is not proof that a module is incomplete.
+This distinction matters: an older record whose status is `ACTIVE` is not proof that you are currently enrolled or still need to complete the unit.
+
+A confirmed current enrollment proves booking state, not whether the work remains incomplete. A published passed attempt is stronger evidence of completion. The absence of an attempt does not, by itself, prove that work is incomplete.
 
 ## Change a learning-unit booking
 
-Every change is a two-step preview and apply flow. The preview does not change your account.
+Supported transitions:
 
-1. Find the exact course ID:
+| Operation | Required current state | Verified result |
+| --- | --- | --- |
+| `enroll` | `BOOKABLE` | `ENROLLED` |
+| `unenroll` | `ENROLLED` and Fuxam permits unbooking | `BOOKABLE` or `FULL` |
+| `join-waitlist` | `FULL` and waitlists are enabled | `WAITLISTED` |
+| `leave-waitlist` | `WAITLISTED` | `BOOKABLE` or `FULL` |
 
-   ```sh
-   "$FUXAM" learning-units --format table
-   ```
+All four operations also require Fuxam's active-term booking window to be open.
 
-2. Preview one operation:
+Every change follows the same guarded path:
 
-   ```sh
-   "$FUXAM" booking enroll COURSE_ID
-   ```
+```mermaid
+flowchart LR
+    A["Pick one exact<br/>course ID"] --> B["Review exact course,<br/>term, state, and fingerprint"]
+    B --> C{"Approve the complete<br/>preview?"}
+    C -->|"No"| X["Stop<br/>No change"]
+    C -->|"Yes"| D["Recheck account,<br/>state, and conflicts"]
+    D --> R{"Still matches?"}
+    R -->|"No"| X
+    R -->|"Yes"| E["Send at most<br/>one request"]
+    E --> F["Read Fuxam back"]
+    F --> V{"Result verified?"}
+    V -->|"Yes"| Y["Done"]
+    V -->|"No"| Z["Inspect Fuxam UI<br/>Do not retry"]
+```
 
-   The JSON shows the exact course and term, observed and desired states, capacity or waitlist details, the conflict-check result when applicable, and a `confirmationFingerprint`.
+### Preview first
 
-3. Read the preview. If it is exactly what you want, apply the same operation and course ID with that fingerprint:
+```sh
+python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" \
+  learning-units --format table
+python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" \
+  booking enroll COURSE_ID
+```
 
-   ```sh
-   "$FUXAM" booking enroll COURSE_ID \
-     --apply --confirm 'sha256:abcdef...'
-   ```
+The preview does not change your account. It shows the exact course and term, current and desired states, capacity or waitlist details, conflict status, and a `confirmationFingerprint`.
 
-The supported operations are:
+### Apply only what you reviewed
 
-- `enroll`
-- `unenroll`
-- `join-waitlist`
-- `leave-waitlist`
+If the preview is exactly what you want, repeat the same operation and course ID with its fingerprint:
 
-Each command targets one exact ID. Before applying, the CLI binds the preview to the Clerk user and organization, resolves the current frontend action, rechecks the exact state and conflicts, and rejects a stale fingerprint. It then sends at most one mutation request, never retries that request automatically, and reads the state back to verify the result. If it reports `OUTCOME_UNKNOWN` or `POSTCONDITION_FAILED`, inspect Fuxam's UI before doing anything else.
+```sh
+python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" \
+  booking enroll COURSE_ID \
+  --apply --confirm 'sha256:abcdef...'
+```
 
-If Fuxam reports a schedule conflict, the CLI stops with `SCHEDULE_CONFLICTS` and does not produce an applicable preview. Review and confirm that conflict in Fuxam's official UI.
+Before dispatch, the CLI rechecks the Clerk user and organization, term, frontend build, course state, booking policy, capacity, and relevant conflicts. A changed fact invalidates the preview. The CLI sends at most one mutation request, never retries it automatically, and reads the authoritative term state back afterward.
 
-Joining a waitlist can succeed while Fuxam reports a conflict warning. The verified result exposes that only as `scheduleConflictWarning`. Unless it is explicitly `false`, `requiresUiInspection` is true and you must inspect the official UI; this includes a lost response whose state change was reconciled successfully.
+> [!CAUTION]
+> Do not repeat a write after `OUTCOME_UNKNOWN` or `POSTCONDITION_FAILED`. Inspect the official Fuxam UI first—the original request may already have succeeded.
 
-When an agent runs this workflow, it must show you the exact preview and pause for your explicit approval before using `--apply`. Module-election and self-study changes remain in Fuxam's official UI.
+### When the CLI stops
+
+| Result | Meaning | Next step |
+| --- | --- | --- |
+| `SCHEDULE_CONFLICTS` | Fuxam found a schedule conflict | Review and confirm it in the official UI |
+| `STALE_PREVIEW` | The supplied fingerprint does not match the fresh preview | Run a new preview and review it again |
+| `NOT_ELIGIBLE` | Fuxam does not currently allow that transition | Check `learning-units` or use the UI |
+| `OUTCOME_UNKNOWN` | The request outcome cannot be proven | Inspect the UI; do not retry blindly |
+| `POSTCONDITION_FAILED` | Fuxam did not show the expected final state | Inspect the UI; do not retry blindly |
+
+### Successful waitlist results that still need attention
+
+A verified `join-waitlist` result can still require the official UI:
+
+| Result field | Meaning | Next step |
+| --- | --- | --- |
+| `scheduleConflictWarning: false` | No conflict warning was reported | No warning-driven UI check is required |
+| `scheduleConflictWarning: true` | Fuxam reported a conflict warning | Inspect the UI |
+| `scheduleConflictWarning: null` | The warning response could not be verified | Inspect the UI |
+| `requiresUiInspection: true` | A warning was present or could not be ruled out | Inspect the UI |
+
+The `scheduleConflictWarning: null` result also includes the warning code `WAITLIST_CONFLICT_STATUS_UNKNOWN`.
+
+Module-election and self-study changes remain in Fuxam's official UI.
+
+## Why a skill instead of MCP?
+
+This project needs short-lived local commands, not a permanent tool server.
+
+| Skill + CLI | MCP server |
+| --- | --- |
+| Starts for one command, then exits | Usually adds a server process and connection lifecycle |
+| Works directly from any terminal | Requires harness-specific MCP configuration |
+| Keeps a small capability surface | Publishes a persistent tool catalog |
+| Is still usable when a harness has no skill support | Requires MCP support in the harness |
+
+MCP is useful when a shared or long-running server is actually needed. It does not add useful capability here, so Fuxam Local stays a skill plus a normal CLI.
 
 ## Privacy and safety
 
-- The Clerk cookie is stored only in macOS Keychain and sent only to Clerk.
-- Fuxam bearer tokens are sent only to `fuxam.app` over HTTPS.
-- Redirects, hosts, ports, response sizes, and server actions are restricted in code.
-- Read and mutation actions use separate fixed allowlists; there is no generic action runner.
-- Fuxam-supplied names and messages are treated as untrusted data, never as commands or approval.
-- There is no analytics, telemetry, hosted service, MCP server, or third-party runtime dependency.
+| Boundary | Behavior |
+| --- | --- |
+| **Clerk cookie** | Stored only in macOS Keychain and sent only to Clerk |
+| **Fuxam session token** | Kept in process memory and sent only to `fuxam.app` |
+| **Network** | HTTPS only, with restricted hosts, ports, redirects, and response sizes |
+| **Actions** | Separate fixed read and mutation allowlists; no generic server-action runner |
+| **Account changes** | One exact ID, fresh preview, explicit fingerprint approval, one request, read-back verification |
+| **Untrusted data** | Fuxam names and messages are treated as data, never commands or approval |
+| **Tracking** | No analytics, telemetry, hosted service, or MCP server |
 
-Results still pass through the agent client you use, so its data controls apply. See [SECURITY.md](SECURITY.md) for the exact boundary.
+Results still pass through the agent client you choose, so that client's data controls apply. See [SECURITY.md](SECURITY.md) for the exact boundary.
 
 ## Development
 
-The offline test suite uses synthetic data and never contacts Fuxam:
+Tests use synthetic fixtures and never contact Fuxam or require a student credential.
 
 ```sh
 python3 -m compileall -q .agents/skills/fuxam-local/scripts
 python3 -m unittest discover -s tests -v
+uvx ruff==0.12.11 check .
+uvx ruff==0.12.11 format --check .
+uvx --from skills-ref==0.1.1 agentskills validate .agents/skills/fuxam-local
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full maintainer checks.
+See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 
 ## Limits
 
-Fuxam has no supported public API for this project, so a Fuxam update may break the client. Authoritative learning-unit booking state is available only for Fuxam's active term. Run the smoke test when something looks wrong, and always verify important information or uncertain mutation outcomes in Fuxam itself.
+Fuxam has no supported public API for this project, so an upstream update may break the client. Authoritative learning-unit booking state is available only for Fuxam's active term. Run `smoke-test --deep` when something looks wrong, and verify important information or uncertain mutation outcomes in Fuxam itself.
 
 ## License
 
