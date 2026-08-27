@@ -1,7 +1,11 @@
 # Notice
 
-Fuxam Local is an independent, unofficial implementation. It is not affiliated with or endorsed by CODE University, Fuxam, Clerk, CodeCampus, or the authors of `fuxam-student-mcp`.
+Inspired by Maximilian Spitzer's
+[Fuxam Student MCP](https://codecampus.tools/docs/fuxam-student-mcp).
+This is an independent implementation based on Fuxam's web-client behavior and
+public descriptions of that project. None of its source code or package
+contents are included; its own license and terms still apply.
 
-Protocol and capability knowledge was derived from behavior exposed by Fuxam's web client and publicly available descriptions of the separate `fuxam-student-mcp` project. No source code or package contents from that project are included here. That project remains subject to its own license and terms.
-
-Product and organization names are used only to identify interoperability targets. No trademark rights are claimed.
+Not affiliated with or endorsed by Maximilian Spitzer, CODE University, Fuxam,
+Clerk, or CodeCampus. Product names identify compatibility; no trademark rights
+are claimed.

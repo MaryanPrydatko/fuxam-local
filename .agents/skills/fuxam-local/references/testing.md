@@ -1,31 +1,19 @@
-# Testing Fuxam Local
+# Verification
 
-Use the script relative to this skill directory. Never put a real credential in a command, test fixture, log, or chat.
+Use the bundled CLI:
 
-1. Check the local runtime and Keychain without contacting Fuxam:
+```sh
+python3 "<skill-root>/scripts/fuxam.py" doctor
+python3 "<skill-root>/scripts/fuxam.py" smoke-test
+python3 "<skill-root>/scripts/fuxam.py" smoke-test --deep
+```
 
-   ```sh
-   python3 "<skill-root>/scripts/fuxam.py" doctor
-   ```
+`doctor` checks the runtime and Keychain without contacting Fuxam. If authentication is missing, follow [authentication.md](authentication.md); the user runs the hidden prompt locally.
 
-2. If authentication is missing, follow [authentication.md](authentication.md). The user must run the hidden `auth set` prompt locally.
+Smoke checks are read-only and return pass/fail status and response types, not academic records. The deep check adds active-term parsing and one frontend-backed catalog page. Study-plan and catalog checks share their commands' schema validators.
 
-3. Verify the ordinary read-only endpoints without returning academic data:
+A pass establishes compatibility for that account at that moment. It does not cover full pagination, every read command, agent consent handling, live writes, or future Fuxam changes.
 
-   ```sh
-   python3 "<skill-root>/scripts/fuxam.py" smoke-test
-   ```
+For a requested live workflow check, `learning-units --format table` is read-only. A booking preview may check one eligible exact course ID; verify `mode: preview` and `changed: false`, then stop. Never pass `--apply` while testing.
 
-4. Verify the active-term page and dynamically resolved read action too. This deeper check may take longer:
-
-   ```sh
-   python3 "<skill-root>/scripts/fuxam.py" smoke-test --deep
-   ```
-
-The report contains only pass/fail status and response shapes. A passing test proves current compatibility for that account and moment; it cannot guarantee that Fuxam's private API will never change.
-
-Study-plan and catalog checks use the same schema validation as their summary commands. A deep check exercises one catalog page, not a full pagination run, every read command, or any live write.
-
-For a user-requested live workflow check, `learning-units --format table` is read-only. A `booking <operation> <course-id>` command without `--apply` may verify preview behavior for one eligible exact course ID; stop after confirming `mode: preview` and `changed: false`.
-
-Repository maintainers should also run the credential-free offline suite documented in the repository README. Never run authenticated checks in CI, and never pass `--apply` while testing.
+Maintainers should also run the offline checks in the repository's `CONTRIBUTING.md`. Tests and CI use synthetic fixtures, never credentials or authenticated requests.
