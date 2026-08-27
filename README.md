@@ -61,6 +61,16 @@ Other shell-capable agents should read the installed `SKILL.md` before use.
 
 ## Booking
 
+```mermaid
+flowchart LR
+    accTitle: Booking confirmation flow
+    accDescr: Preview and approve a change, recheck it, send once, then verify the result. Uncertain results require manual inspection.
+    preview[Preview] --> approval[Your approval] --> recheck[Recheck]
+    recheck -->|Matches preview| send[Send once] --> verify{Result verified?}
+    verify -->|Yes| report[Report result]
+    verify -->|No or uncertain| stop[Stop and inspect Fuxam]
+```
+
 Get the exact course ID from `learning-units`, then preview the change:
 
 ```sh
