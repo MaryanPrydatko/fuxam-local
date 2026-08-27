@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import contextlib
 import http.client
@@ -15,15 +16,27 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from types import ModuleType
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".agents" / "skills" / "fuxam-local" / "scripts" / "fuxam.py"
-SPEC = importlib.util.spec_from_file_location("fuxam_local_cli", SCRIPT)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("Could not load the Fuxam CLI for tests.")
-fuxam = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(fuxam)
+
+
+def load_script_module(name: str, path: pathlib.Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load bundled module {name}.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+SCRIPTS = SCRIPT.parent
+load_script_module("fuxam_errors", SCRIPTS / "fuxam_errors.py")
+protocol = load_script_module("fuxam_protocol", SCRIPTS / "fuxam_protocol.py")
+fuxam = load_script_module("fuxam_local_cli", SCRIPT)
 
 
 class FakeResponse:
@@ -427,7 +440,7 @@ class ParsingTests(unittest.TestCase):
                 fuxam.parse_flight(body)
 
     def test_flight_rejects_oversized_body_before_parsing(self) -> None:
-        with mock.patch.object(fuxam, "MAX_RESPONSE_BYTES", 4):
+        with mock.patch.object(protocol, "MAX_RESPONSE_BYTES", 4):
             with self.assertRaisesRegex(fuxam.FuxamError, "large"):
                 fuxam.parse_flight(b'0:{"a":"$@1"}\n1:true\n')
 
@@ -450,13 +463,13 @@ class ParsingTests(unittest.TestCase):
             b'0:{"a":"$@1"}\n1:["$2","$2"]\n2:["$3","$3"]\n'
             b'3:["$4","$4"]\n4:[true,false]\n'
         )
-        with mock.patch.object(fuxam, "MAX_FLIGHT_NODES", 16, create=True):
+        with mock.patch.object(protocol, "MAX_FLIGHT_NODES", 16):
             with self.assertRaisesRegex(fuxam.FuxamError, "complex"):
                 fuxam.parse_flight(body)
 
     def test_flight_bounds_repeated_text_expansion(self) -> None:
         body = b'0:{"a":"$@1"}\n1:["$2","$2","$2","$2"]\n2:T20,' + b"x" * 32
-        with mock.patch.object(fuxam, "MAX_FLIGHT_STRING_BYTES", 96, create=True):
+        with mock.patch.object(protocol, "MAX_FLIGHT_STRING_BYTES", 96):
             with self.assertRaisesRegex(fuxam.FuxamError, "complex"):
                 fuxam.parse_flight(body)
 
@@ -614,17 +627,35 @@ class ParsingTests(unittest.TestCase):
                         fuxam.parse_term_page(body)
                     self.assertNotIn("private-number", str(raised.exception))
 
-    def test_term_page_ignores_non_integer_flight_channels(self) -> None:
+    def test_term_page_ignores_other_flight_channels(self) -> None:
         record = "a:" + json.dumps(synthetic_term_payload()) + "\n"
-        for channel in (True, 1.0):
-            body = (
-                "<script>self.__next_f.push("
-                + json.dumps([channel, record])
-                + ")</script>"
-            ).encode()
+        for channel in (0, 2, -1, True, False, 1.0, "1", None, {}, []):
+            ignored = "self.__next_f.push(" + json.dumps([channel, record]) + ");"
+            body = ("<script>" + ignored + "</script>").encode()
             with (
                 self.subTest(channel=channel),
                 self.assertRaisesRegex(fuxam.FuxamError, "current-term"),
+            ):
+                fuxam.parse_term_page(body)
+
+            body = (
+                "<script>"
+                + ignored
+                + "self.__next_f.push("
+                + json.dumps([1, record])
+                + ");</script>"
+            ).encode()
+            with self.subTest(channel=channel, followed_by_data=True):
+                self.assertEqual(fuxam.parse_term_page(body), synthetic_term_payload())
+
+    def test_term_page_rejects_malformed_data_pushes(self) -> None:
+        for push in ([1], [1, None], [1, 0], [1, []], [1, {}], [1, "", "extra"]):
+            body = (
+                "<script>self.__next_f.push(" + json.dumps(push) + ")</script>"
+            ).encode() + synthetic_term_html()
+            with (
+                self.subTest(push=push),
+                self.assertRaisesRegex(fuxam.FuxamError, "malformed term page"),
             ):
                 fuxam.parse_term_page(body)
 
@@ -642,7 +673,7 @@ class ParsingTests(unittest.TestCase):
 
     def test_term_page_rejects_oversized_input_before_parsing(self) -> None:
         with (
-            mock.patch.object(fuxam, "MAX_RESPONSE_BYTES", 4),
+            mock.patch.object(protocol, "MAX_RESPONSE_BYTES", 4),
             self.assertRaisesRegex(fuxam.FuxamError, "large"),
         ):
             fuxam.parse_term_page(b"12345")
@@ -1139,8 +1170,8 @@ class CredentialAndNetworkTests(unittest.TestCase):
     ) -> None:
         code = textwrap.dedent(
             """
-            import importlib.util
             import os
+            import pathlib
             import sys
             from unittest import mock
 
@@ -1152,9 +1183,8 @@ class CredentialAndNetworkTests(unittest.TestCase):
                 os.close(tty)
                 raise AssertionError("The child still has a controlling terminal.")
 
-            spec = importlib.util.spec_from_file_location("fuxam_no_tty", sys.argv[1])
-            cli = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cli)
+            sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
+            import fuxam as cli
             keychain = mock.Mock()
             cli.Keychain = mock.Mock(return_value=keychain)
             sys.argv = [sys.argv[1], "auth", "set"]
@@ -3219,11 +3249,17 @@ class SkillMetadataTests(unittest.TestCase):
         self.assertIn("\ndescription:", frontmatter)
 
     def test_runtime_has_no_third_party_imports(self) -> None:
-        imports = {
-            line.split()[1].split(".")[0]
-            for line in SCRIPT.read_text().splitlines()
-            if line.startswith(("import ", "from "))
-        }
+        scripts = SCRIPT.parent
+        local_modules = {path.stem for path in scripts.glob("*.py")}
+        imports: set[str] = set()
+        for path in scripts.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name.split(".")[0] for alias in node.names)
+                elif (
+                    isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
+                ):
+                    imports.add(node.module.split(".")[0])
         allowed = {
             "__future__",
             "argparse",
@@ -3245,7 +3281,7 @@ class SkillMetadataTests(unittest.TestCase):
             "urllib",
             "warnings",
         }
-        self.assertEqual(imports - allowed, set())
+        self.assertEqual(imports - allowed - local_modules, set())
 
     def test_skill_bundles_no_mcp_server(self) -> None:
         scripts = SCRIPT.parent

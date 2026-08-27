@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install Fuxam Local as a portable Agent Skill with compatibility aliases."""
+"""Install Fuxam Local for terminal and agent use."""
 
 from __future__ import annotations
 

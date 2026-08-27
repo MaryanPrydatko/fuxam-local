@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -35,6 +37,38 @@ class InstallerTests(unittest.TestCase):
                 with self.subTest(alias=alias):
                     self.assertTrue(alias.is_symlink())
                     self.assertEqual(alias.resolve(), canonical.resolve())
+
+    def test_installed_entrypoints_run_outside_the_repository(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fuxam-install-test-") as directory:
+            home = pathlib.Path(directory)
+            for replace in (False, True):
+                installer.install(home, replace=replace)
+                for relative in (
+                    installer.CANONICAL_RELATIVE,
+                    *installer.ALIAS_RELATIVES,
+                ):
+                    entrypoint = home / relative / "scripts/fuxam.py"
+                    for arguments in (["--help"], ["booking", "enroll", "--help"]):
+                        with self.subTest(
+                            replace=replace, path=relative, arguments=arguments
+                        ):
+                            result = subprocess.run(  # noqa: S603 - local code, fixed args.
+                                [
+                                    sys.executable,
+                                    "-E",
+                                    "-s",
+                                    str(entrypoint),
+                                    *arguments,
+                                ],
+                                cwd=home,
+                                stdin=subprocess.DEVNULL,
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                                timeout=10,
+                            )
+                            self.assertIn("usage:", result.stdout)
+                            self.assertEqual(result.stderr, "")
 
     def test_dry_run_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

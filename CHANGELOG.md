@@ -1,56 +1,65 @@
 # Changelog
 
+## Unreleased
+
+- Separate response decoding from the CLI.
+- Test installed commands through shared and aliased skill paths.
+- Simplify Flight channel handling and test ignored and malformed pushes.
+- Shorten help and documentation; credit the project that inspired this one.
+- Remove unused testing graphics.
+
 ## 0.4.1 — 2026-08-27
 
-- Refuse credential entry when a terminal cannot hide input, and stop commands if the signed-in user or organization changes.
-- Reconcile unexpected booking-response and verification failures without retrying a mutation.
-- Decode nested React Flight model references and literal text correctly, with bounded depth and expansion.
-- Reject malformed study-plan and catalog data instead of reporting false empty or complete results; use those same validators in smoke tests.
-- Support shared, symlinked skill directories while preserving backups and rollback.
-- Add a working private vulnerability-reporting channel.
+- Require hidden terminal input for credentials.
+- Stop commands if the signed-in user or organization changes.
+- Check uncertain booking results without retrying writes.
+- Decode nested React Flight references and literal text, with size and depth limits.
+- Reject malformed study-plan and catalog responses, including in smoke tests.
+- Fix installation through shared, symlinked skill directories.
+- Enable private vulnerability reporting.
 
 ## 0.4.0 — 2026-08-25
 
-- Added authoritative active-term learning-unit enrollment, waitlist, self-study, and availability data from Fuxam's My Learning Units page.
-- Changed `enrolled --term` to report confirmed current-term enrollments instead of offering-tag overlaps.
-- Added guarded preview-and-confirm commands for enrolling, unenrolling, joining a waitlist, and leaving a waitlist.
-- Bound each change to one exact course, Clerk context, and a final fresh-state check; disabled mutation retries and added read-after-write verification.
+- Read active-term enrollments, waitlists, self-study, and availability from My Learning Units.
+- Make `enrolled --term` use confirmed enrollments, not offering-tag overlaps.
+- Add preview-and-confirm commands for enrollment and waitlist changes.
+- Require an exact course, account, organization, and fresh state for each write.
+- Verify writes by reading back the result; never retry a mutation.
 
 ## 0.3.2 — 2026-08-24
 
-- Moved installer backups outside skill-discovery directories so old copies cannot appear as duplicate skills.
+- Store installer backups outside skill-discovery directories.
+- Migrate older backups during replacement, with rollback on failure.
 
 ## 0.3.1 — 2026-08-24
 
-- Stopped presenting `ACTIVE` learning-unit records with a matching offering tag as term enrollment or current workload.
-- Marked term enrollment, workload, and completion as unknown in offering-overlap results.
-- Tightened the skill's evidence rules for formal elections, learning-unit records, and concrete progress.
+- Stop treating `ACTIVE` records with matching offering tags as term enrollment.
+- Mark unchecked enrollment, workload, and completion as unknown.
+- Use study-plan elections for module questions and attempts for progress.
 
 ## 0.3.0 — 2026-08-24
 
-- Added term-filtered learning-unit summaries with compact terminal tables.
-- Added a `modules` command for formal study-plan elections.
-- Labeled explicit module associations separately from title-only code mentions.
-- Surfaced ambiguous or incomplete records instead of presenting them as definitive empty results.
-- Sanitized terminal tables against control-character injection.
-- Treated an empty catalog search as a valid result instead of a pagination error.
+- Add offering-term filters and terminal tables for learning-unit records.
+- Add `modules` for formal study-plan elections.
+- Accept semester names such as `Fall 2026` as well as term codes.
+- Distinguish explicit module associations from codes mentioned in titles.
+- Report ambiguous or incomplete records.
+- Strip terminal control characters from tables.
+- Accept empty catalog searches without a pagination error.
 
 ## 0.2.1 — 2026-08-24
 
-- Fixed Clerk token renewal for accounts without an active organization.
-- Added a regression test for the null-organization session shape.
+- Fix token renewal for accounts without an active organization.
 
 ## 0.2.0 — 2026-08-24
 
-- Made the Agent Skill host-neutral and aligned it with the open Agent Skills layout.
-- Added a safe installer for shared `.agents`, Claude, and Codex skill locations.
-- Added offline readiness diagnostics and privacy-preserving live smoke tests.
-- Kept the universal interface as a dependency-free CLI with no MCP server or daemon.
+- Adopt the Agent Skills layout for use across local agents.
+- Add a shared installer with Codex and Claude aliases.
+- Add offline diagnostics and read-only live smoke tests.
 
 ## 0.1.0 — 2026-08-24
 
-- Added the private local Codex skill and dependency-free Python CLI.
-- Added read-only catalog, study-plan, progress, schedule, deadline, and conflict access.
-- Added macOS Keychain credential storage and strict request-origin controls.
-- Added synthetic unit tests, Ruff checks, and GitHub Actions CI.
-- Published under the MIT License with no telemetry or hosted component.
+- Add a read-only CLI for courses, study plans, progress, and schedules.
+- Store credentials in macOS Keychain and restrict request origins.
+- Add offline tests, lint checks, and CI.
+- Release under the MIT license.
