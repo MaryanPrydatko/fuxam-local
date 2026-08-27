@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -18,6 +23,68 @@ SPEC.loader.exec_module(installer)
 
 
 class InstallerTests(unittest.TestCase):
+    def test_linux_setup_warning_is_printed_by_the_installer(self) -> None:
+        stdout = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(installer.sys, "platform", "linux"),
+            mock.patch.object(installer.shutil, "which", return_value=None),
+            mock.patch.object(
+                installer.sys,
+                "argv",
+                [str(INSTALL_SCRIPT), "--home", directory, "--dry-run"],
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(installer.main(), 0)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+        result = json.loads(stdout.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertIn("secret-tool", " ".join(result["warnings"]))
+        self.assertIn("--auth env", " ".join(result["warnings"]))
+
+    def test_linux_missing_secret_tool_warns_without_blocking_install(self) -> None:
+        for dry_run in (False, True):
+            with (
+                self.subTest(dry_run=dry_run),
+                tempfile.TemporaryDirectory() as directory,
+                mock.patch.object(installer.sys, "platform", "linux"),
+                mock.patch.object(installer.shutil, "which", return_value=None),
+            ):
+                home = pathlib.Path(directory)
+                result = installer.install(home, aliases=False, dry_run=dry_run)
+                self.assertTrue(result["ok"])
+                warning = " ".join(result["warnings"])
+                self.assertIn("libsecret-tools", warning)
+                self.assertIn("--auth env", warning)
+                self.assertEqual(
+                    (home / installer.CANONICAL_RELATIVE).exists(), not dry_run
+                )
+
+    def test_available_secret_tool_does_not_claim_the_keyring_is_unlocked(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(installer.sys, "platform", "linux"),
+            mock.patch.object(
+                installer.shutil, "which", return_value="/usr/bin/secret-tool"
+            ),
+        ):
+            result = installer.install(pathlib.Path(directory), dry_run=True)
+            self.assertEqual(result["warnings"], [])
+            self.assertNotIn("configured", result)
+
+    def test_other_platforms_do_not_check_for_secret_tool(self) -> None:
+        for platform in ("darwin", "win32"):
+            with (
+                self.subTest(platform=platform),
+                tempfile.TemporaryDirectory() as directory,
+                mock.patch.object(installer.sys, "platform", platform),
+                mock.patch.object(installer.shutil, "which") as which,
+            ):
+                result = installer.install(pathlib.Path(directory), dry_run=True)
+                self.assertEqual(result["warnings"], [])
+                which.assert_not_called()
+
     def require_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -172,6 +239,99 @@ class InstallerTests(unittest.TestCase):
 
             self.assertTrue(result["dryRun"])
             self.assertEqual(list(home.iterdir()), [])
+
+    def test_installed_temporary_auth_before_and_after_update(self) -> None:
+        code = textwrap.dedent("""
+            import pathlib
+            import runpy
+            import socket
+            import sys
+
+            sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
+            import fuxam_credentials
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("Offline auth check touched the network or keyring")
+
+            fuxam_credentials.credential_store = forbidden
+            socket.create_connection = forbidden
+            sys.argv = sys.argv[1:]
+            runpy.run_path(sys.argv[0], run_name="__main__")
+        """)
+        cases = (
+            (["--version"], None, 0),
+            (["--auth", "env", "auth", "status"], "synthetic-cookie", 0),
+            (["--auth", "env", "doctor"], "synthetic-cookie", 0),
+            (["--auth", "env", "doctor"], None, 1),
+            (["--auth", "env", "context"], None, 1),
+            (["--auth", "env", "context"], "synthetic\ninvalid", 1),
+            (["context"], "synthetic-cookie", 1),
+            (["--auth", "env", "auth", "clear"], "synthetic-cookie", 1),
+        )
+        with tempfile.TemporaryDirectory(prefix="fuxam-auth-test-") as directory:
+            home = pathlib.Path(directory)
+            (home / ".env").write_text(
+                "FUXAM_COOKIE=synthetic-file-cookie\n", encoding="utf-8"
+            )
+            for replace in (False, True):
+                installer.install(home, replace=replace)
+                for relative in (
+                    installer.CANONICAL_RELATIVE,
+                    *installer.ALIAS_RELATIVES,
+                ):
+                    entrypoint = home / relative / "scripts/fuxam.py"
+                    for arguments, cookie, expected_status in cases:
+                        with self.subTest(
+                            replace=replace,
+                            path=relative,
+                            arguments=arguments,
+                            configured=cookie is not None,
+                        ):
+                            environment = os.environ.copy()
+                            environment.pop("FUXAM_COOKIE", None)
+                            if cookie is not None:
+                                environment["FUXAM_COOKIE"] = cookie
+                            result = subprocess.run(  # noqa: S603 - installed code, synthetic cookie only.
+                                [
+                                    sys.executable,
+                                    "-E",
+                                    "-s",
+                                    "-c",
+                                    code,
+                                    str(entrypoint),
+                                    *arguments,
+                                ],
+                                cwd=home,
+                                env=environment,
+                                stdin=subprocess.DEVNULL,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=10,
+                            )
+                            self.assertEqual(
+                                result.returncode, expected_status, result.stderr
+                            )
+                            self.assertNotIn("synthetic", result.stdout + result.stderr)
+                            if arguments == ["--version"]:
+                                self.assertRegex(
+                                    result.stdout, r"fuxam\.py \d+\.\d+\.\d+"
+                                )
+                                self.assertEqual(result.stderr, "")
+                                continue
+                            report = json.loads(result.stdout or result.stderr)
+                            if arguments[-1] == "doctor":
+                                self.assertEqual(report["ok"], cookie is not None)
+                                self.assertEqual(
+                                    report["credential"]["storage"], "environment"
+                                )
+                            elif expected_status == 0:
+                                self.assertEqual(
+                                    report,
+                                    {"configured": True, "storage": "environment"},
+                                )
+                            else:
+                                self.assertIn("error", report)
 
     def test_install_supports_skill_roots_symlinked_to_canonical_parent(self) -> None:
         self.require_symlinks()

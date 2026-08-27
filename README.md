@@ -3,18 +3,19 @@
 A CLI and agent skill for CODE University's Fuxam. Read courses, study progress
 and schedules; enroll, unenroll, or manage waitlists for the active term.
 
-Requires Python 3.10+. Uses the standard library and your OS credential store.
+Requires Python 3.10+. Standard library only. Login uses your OS keyring by default.
 No MCP server or telemetry. Unofficial; Fuxam's private API can change.
 
-| System | Credential storage | Setup |
+| System | Saved login | Setup |
 | --- | --- | --- |
 | macOS | Keychain | Built in |
 | Linux | Secret Service | `secret-tool` and an unlocked desktop keyring |
 | Windows | Credential Manager | Built in; no administrator access needed |
 
-Linux: on Ubuntu/Debian, install `libsecret-tools`; a Secret Service provider
-such as GNOME Keyring must also be running. WSL needs the same Linux setup.
-There is no `.env` or plaintext fallback for machines without a keyring.
+On Linux, install `libsecret-tools` (Debian/Ubuntu) or `libsecret` (Fedora/Arch).
+A Secret Service provider such as GNOME Keyring must also be running and unlocked.
+WSL follows Linux. Don't want a keyring? Use [temporary login](.agents/skills/fuxam-local/references/authentication.md#temporary-login)
+with `--auth env`. Neither option loads `.env` files.
 
 ## Install
 
@@ -28,21 +29,16 @@ python3 install.py
 
 Installs to `~/.agents/skills/fuxam-local`, with Codex and Claude aliases
 (copies on Windows, symlinks elsewhere).
-To update from the checkout:
-
-```sh
-git pull --ff-only
-python3 install.py --replace
-```
-
-Previous copies are backed up under `~/.agents/backups/fuxam-local`.
 Start a new agent session after installing.
 
 ## Sign in
 
 Sign in to [Fuxam](https://fuxam.app) and copy the `__client` cookie value from
 `clerk.fuxam.app`. Treat it like a password: never put it in chat, screenshots,
-shell arguments, environment variables, or files.
+shell arguments, or files. The [authentication guide](.agents/skills/fuxam-local/references/authentication.md)
+shows where to find it.
+
+Set the CLI path in each new terminal:
 
 ```sh
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
@@ -54,16 +50,22 @@ In Windows PowerShell, set the path with:
 $FUXAM = "$env:USERPROFILE/.agents/skills/fuxam-local/scripts/fuxam.py"
 ```
 
-Then sign in and check the connection:
+Sign in:
 
 ```sh
 python3 "$FUXAM" auth set
+```
+
+Paste into the hidden prompt, then check the connection:
+
+```sh
+python3 "$FUXAM" doctor
 python3 "$FUXAM" smoke-test
 ```
 
-Paste only into the hidden terminal prompt. The cookie stays in your OS store.
-See [authentication](.agents/skills/fuxam-local/references/authentication.md)
-for browser steps, renewal, and removal.
+`doctor` checks local setup; `smoke-test` checks the live connection without
+returning academic records. Repeat `auth set` with a fresh cookie when the
+session expires.
 
 ## Use
 
@@ -115,6 +117,21 @@ do not retry automatically. Waitlist warnings may also need UI inspection.
 
 Module elections and self-study changes stay in Fuxam's UI.
 See [booking details](docs/usage.md#booking) and [security](SECURITY.md).
+
+## Update
+
+From your original checkout:
+
+```sh
+git pull --ff-only
+python3 install.py --replace
+python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" --version
+```
+
+Updates are manual. The installer backs up old copies under
+`~/.agents/backups/fuxam-local` and leaves saved credentials alone.
+Start a new agent session to load the updated skill.
+For a release download, run `install.py --replace` from the new extracted folder.
 
 ## Contributing
 

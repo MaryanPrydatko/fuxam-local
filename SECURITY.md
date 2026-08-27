@@ -2,12 +2,12 @@
 
 ## Credentials
 
-The Clerk `__client` cookie grants account access while valid. Enter it only
-through `fuxam.py auth set` in an interactive terminal. If input cannot be hidden,
-setup stops; pipes, arguments, and environment variables are not alternatives.
+The Clerk `__client` cookie grants account access while valid. For saved login,
+enter it through `fuxam.py auth set` in an interactive terminal. If input cannot
+be hidden, setup stops; do not bypass the prompt with pipes or arguments.
 Keep credentials out of source, logs, chat, issues, and screenshots.
 
-The cookie stays in the user's OS credential store:
+Saved cookies use the user's OS credential store:
 
 - macOS: Keychain, service `codex-fuxam-local`, account `__client`.
 - Linux: Secret Service through `secret-tool`, with the same service/account
@@ -15,9 +15,20 @@ The cookie stays in the user's OS credential store:
 - Windows: Credential Manager, target `codex-fuxam-local/__client`. Persistence
   is limited to the same user on this device, without roaming.
 
-There is no `.env` or plaintext fallback. Protect your OS account and keyring;
-programs running as you may access an unlocked store. Session tokens stay in
-process memory; Python strings cannot be reliably erased from memory.
+There is no `.env` loading or automatic fallback. Protect your OS account and
+keyring; programs running as you may access an unlocked store. Session tokens
+stay in process memory; Python strings cannot be reliably erased from memory.
+
+With explicit `--auth env`, the CLI reads `FUXAM_COOKIE` once and never opens or
+changes the saved store. Missing or malformed values stop the request. A variable
+present without that flag is rejected to avoid silently using another account.
+The CLI removes the variable from its own environment before requests, but cannot
+clear it from the parent shell, other processes, OS process inspection, or memory.
+Environment values are not encrypted; inherited environments, debugging tools,
+and crash reports may expose them. Unset the variable in the calling shell when
+done. Never store it in a shell profile or `.env` file. The
+[authentication guide](.agents/skills/fuxam-local/references/authentication.md#temporary-login)
+shows hidden-input examples.
 
 The Windows blob limit is [2,560 bytes](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
 Linux input is capped below [secret-tool's 8,192-byte buffer](https://github.com/GNOME/libsecret/blob/master/tool/secret-tool.c)

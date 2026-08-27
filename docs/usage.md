@@ -6,6 +6,11 @@ Set the installed CLI path once per terminal:
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
 ```
 
+On Windows PowerShell, use `$FUXAM = "$env:USERPROFILE/.agents/skills/fuxam-local/scripts/fuxam.py"`
+and replace `python3` with `py -3`.
+For [temporary login](../.agents/skills/fuxam-local/references/authentication.md#temporary-login),
+put `--auth env` before every command below, including both booking steps.
+
 `doctor` checks local readiness without contacting Fuxam. `smoke-test` exercises
 read-only paths and returns only check metadata; `smoke-test --deep` also checks
 the active-term page and one catalog action. A passing check reflects that

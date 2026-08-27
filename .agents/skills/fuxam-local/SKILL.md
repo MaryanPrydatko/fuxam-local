@@ -6,7 +6,7 @@ license: MIT
 
 # Fuxam Local
 
-Requires Python 3.10+ on macOS, Linux, or Windows. Linux also needs `secret-tool` and an unlocked Secret Service keyring. Resolve `<skill-root>` from this file's directory, not a harness-specific installation path.
+Requires Python 3.10+ on macOS, Linux, or Windows. Saved login on Linux needs `secret-tool` and an unlocked Secret Service keyring; explicit temporary login does not. Resolve `<skill-root>` from this file's directory, not a harness-specific installation path.
 
 ```sh
 python3 "<skill-root>/scripts/fuxam.py" <command>
@@ -35,7 +35,9 @@ Report incomplete results and schema errors as unverified, not empty.
 
 ## Authentication and privacy
 
-For setup or authentication failures, read [authentication.md](references/authentication.md). If authentication is unavailable or expired, stop the data request. The user runs the hidden prompt locally; never request, print, log, or summarize credentials in chat.
+For setup, temporary login, or authentication failures, read [authentication.md](references/authentication.md). If authentication is unavailable or expired, stop the data request. The user supplies credentials locally; never request, print, log, or inspect their value.
+
+Use the default keyring unless the user selects temporary login. For that mode, put `--auth env` before every command, including booking preview and apply; the user supplies `FUXAM_COOKIE` to the agent's process. Never switch sources automatically after a failure. A user-requested switch starts a new command; do not reuse earlier results or booking approvals. If the CLI reports a source conflict, ask which login the user intends. Never use `env`, `printenv`, or shell expansion to inspect the cookie.
 
 On `ACCOUNT_CHANGED`, stop and confirm the intended account before starting a new command. Do not mix results across accounts.
 

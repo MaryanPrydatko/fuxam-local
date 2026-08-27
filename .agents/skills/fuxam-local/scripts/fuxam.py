@@ -11,6 +11,7 @@ import http.client
 import io
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -82,14 +83,19 @@ class MutationPreconditionChanged(FuxamError):
     """A preview-bound account or build changed before the mutation request."""
 
 
-def doctor_status() -> dict[str, Any]:
+def doctor_status(
+    *, auth: str = "keyring", cookie: str | None = None
+) -> dict[str, Any]:
     """Report local readiness without contacting Fuxam or exposing credentials."""
     python_supported = sys.version_info >= (3, 10)
     platform_supported = sys.platform in {"darwin", "linux", "win32"}
     configured: bool | None = None
     storage: str | None = None
     storage_failed = False
-    if platform_supported:
+    if auth == "env":
+        storage = "environment"
+        configured = cookie is not None
+    elif platform_supported:
         try:
             store = credential_store()
             storage = store.storage
@@ -138,6 +144,10 @@ def doctor_status() -> dict[str, Any]:
                 else "Unlock your desktop keyring or run auth set locally."
             )
         result["credential"]["hint"] = hint
+    elif auth == "env" and not configured:
+        result["credential"]["hint"] = (
+            "FUXAM_COOKIE is not set. Supply it to this process, then use --auth env."
+        )
     return result
 
 
@@ -1019,7 +1029,8 @@ def render_terminal_result(command: str, result: dict[str, Any]) -> str:
 
 
 class FuxamClient:
-    def __init__(self) -> None:
+    def __init__(self, *, cookie: str | None = None) -> None:
+        self._client_cookie = cookie
         self.token: str | None = None
         self.token_expires_at = 0.0
         self.user_id: str | None = None
@@ -1131,7 +1142,9 @@ class FuxamClient:
     def _session_token(self, force: bool = False) -> str:
         if not force and self.token and time.time() < self.token_expires_at - 10:
             return self.token
-        cookie = credential_store().get()
+        cookie = self._client_cookie
+        if cookie is None:
+            cookie = credential_store().get()
         if not cookie:
             raise FuxamError(
                 "Authentication is not configured. Run `fuxam.py auth set` locally."
@@ -2085,6 +2098,13 @@ def bounded_int(minimum: int, maximum: int) -> Callable[[str], int]:
 
 def build_parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
+    root.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    root.add_argument(
+        "--auth",
+        choices=("keyring", "env"),
+        default="keyring",
+        help="credential source: OS keyring (default) or temporary FUXAM_COOKIE",
+    )
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("doctor", help="Check local readiness without contacting Fuxam")
     smoke = commands.add_parser(
@@ -2106,7 +2126,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enrolled.add_argument(
         "--term",
-        help="show confirmed enrollments when this is the active Fuxam term",
+        help='active semester, e.g. "Fall 2026" or FS26; shows confirmed enrollments',
     )
     add_output_format_argument(enrolled)
     learning_units = commands.add_parser(
@@ -2114,7 +2134,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show active-term enrolled, waitlisted, self-study, and bookable units",
     )
     learning_units.add_argument(
-        "--term", help="require this semester to be Fuxam's active term"
+        "--term", help='require the active semester, e.g. "Fall 2026" or FS26'
     )
     add_output_format_argument(learning_units)
     booking = commands.add_parser(
@@ -2139,7 +2159,7 @@ def build_parser() -> argparse.ArgumentParser:
     modules = commands.add_parser(
         "modules", help="List formally elected study-plan modules"
     )
-    modules.add_argument("--term", help="filter formal elections by semester")
+    modules.add_argument("--term", help='filter elections, e.g. "Fall 2026" or FS26')
     add_output_format_argument(modules)
     bookable = commands.add_parser(
         "bookable", help="List one page of bookable learning units"
@@ -2207,8 +2227,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> Any:
+    # Snapshot once; do not pass the cookie to child processes or reread it on retry.
+    cookie = os.environ.pop("FUXAM_COOKIE", None)
+    if args.auth != "env" and cookie is not None:
+        raise FuxamError(
+            "FUXAM_COOKIE is set. Use --auth env before the command, "
+            "or unset it to use the OS keyring."
+        )
+    if args.auth == "env":
+        if args.command == "auth" and args.operation != "status":
+            raise FuxamError(
+                "auth set and auth clear only manage the OS keyring. "
+                "Temporary credentials must be set or unset in the calling environment."
+            )
+        if cookie is not None:
+            cookie = normalize_client_cookie(cookie)
+        if args.command == "auth":
+            return {"configured": cookie is not None, "storage": "environment"}
+        if args.command != "doctor" and cookie is None:
+            raise FuxamError("FUXAM_COOKIE is not set. No saved credential was used.")
+
     if args.command == "doctor":
-        return doctor_status()
+        return doctor_status(auth=args.auth, cookie=cookie)
 
     if args.command == "auth":
         store = credential_store()
@@ -2243,7 +2283,7 @@ def run(args: argparse.Namespace) -> Any:
         store.set(value)
         return {"configured": True, "storage": store.storage}
 
-    client = FuxamClient()
+    client = FuxamClient(cookie=cookie)
     if args.command == "smoke-test":
         return smoke_test(client, deep=args.deep)
     if args.command == "context":

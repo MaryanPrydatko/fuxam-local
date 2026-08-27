@@ -1166,6 +1166,344 @@ class TerminalSummaryTests(unittest.TestCase):
         client.term_courses.assert_not_called()
 
 
+class TemporaryAuthenticationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.environment = mock.patch.dict(os.environ, {}, clear=True)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def test_environment_status_does_not_open_or_write_a_keyring(self) -> None:
+        for value in (None, "__client=synthetic-cookie; Path=/"):
+            with self.subTest(configured=value is not None):
+                if value is not None:
+                    os.environ["FUXAM_COOKIE"] = value
+                with mock.patch.object(fuxam, "credential_store") as store:
+                    result = fuxam.run(
+                        fuxam.build_parser().parse_args(
+                            ["--auth", "env", "auth", "status"]
+                        )
+                    )
+                self.assertEqual(
+                    result,
+                    {"configured": value is not None, "storage": "environment"},
+                )
+                self.assertNotIn("FUXAM_COOKIE", os.environ)
+                store.assert_not_called()
+
+    def test_environment_doctor_is_offline_and_reports_the_selected_source(
+        self,
+    ) -> None:
+        for platform in ("darwin", "linux", "win32"):
+            for configured in (False, True):
+                with self.subTest(platform=platform, configured=configured):
+                    if configured:
+                        os.environ["FUXAM_COOKIE"] = "synthetic-cookie"
+                    with (
+                        mock.patch.object(fuxam.sys, "platform", platform),
+                        mock.patch.object(fuxam, "credential_store") as store,
+                        mock.patch.object(
+                            fuxam.urllib.request, "build_opener"
+                        ) as network,
+                    ):
+                        result = fuxam.run(
+                            fuxam.build_parser().parse_args(["--auth", "env", "doctor"])
+                        )
+                    self.assertEqual(result["ok"], configured)
+                    self.assertEqual(result["credential"]["configured"], configured)
+                    self.assertEqual(result["credential"]["storage"], "environment")
+                    self.assertFalse(result["network"]["tested"])
+                    self.assertNotIn("synthetic-cookie", json.dumps(result))
+                    store.assert_not_called()
+                    network.assert_not_called()
+
+    def test_missing_environment_cookie_cannot_fall_back_to_saved_login(self) -> None:
+        for command in (
+            ["context"],
+            ["smoke-test"],
+            ["booking", "enroll", "course-id"],
+        ):
+            with (
+                self.subTest(command=command),
+                mock.patch.object(fuxam, "credential_store") as store,
+                mock.patch.object(fuxam.urllib.request, "build_opener") as network,
+                self.assertRaisesRegex(fuxam.FuxamError, "FUXAM_COOKIE"),
+            ):
+                fuxam.run(fuxam.build_parser().parse_args(["--auth", "env", *command]))
+            store.assert_not_called()
+            network.assert_not_called()
+
+    def test_environment_set_and_clear_cannot_change_saved_credentials(self) -> None:
+        for operation in ("set", "clear"):
+            with (
+                self.subTest(operation=operation),
+                mock.patch.object(fuxam, "credential_store") as store,
+                mock.patch.object(fuxam.getpass, "getpass") as prompt,
+                self.assertRaisesRegex(fuxam.FuxamError, "keyring"),
+            ):
+                fuxam.run(
+                    fuxam.build_parser().parse_args(
+                        ["--auth", "env", "auth", operation]
+                    )
+                )
+            store.assert_not_called()
+            prompt.assert_not_called()
+
+    def test_environment_variable_requires_explicit_selection(self) -> None:
+        for arguments in (
+            ["context"],
+            ["doctor"],
+            ["auth", "clear"],
+            ["--auth", "keyring", "auth", "status"],
+            ["booking", "enroll", "course-open"],
+            ["booking", "enroll", "course-open", "--apply", "--confirm", "sha256:old"],
+        ):
+            for value in ("", " ", "synthetic-cookie"):
+                os.environ["FUXAM_COOKIE"] = value
+                with (
+                    self.subTest(arguments=arguments, length=len(value)),
+                    mock.patch.object(fuxam, "credential_store") as store,
+                    mock.patch.object(fuxam.urllib.request, "build_opener") as network,
+                    self.assertRaisesRegex(fuxam.FuxamError, "--auth env") as raised,
+                ):
+                    fuxam.run(fuxam.build_parser().parse_args(arguments))
+                self.assertNotIn("synthetic-cookie", str(raised.exception))
+                self.assertNotIn("FUXAM_COOKIE", os.environ)
+                store.assert_not_called()
+                network.assert_not_called()
+
+    def test_environment_cookie_validation_precedes_network_and_storage(self) -> None:
+        for value in (
+            "",
+            " ",
+            "synthetic\ncookie",
+            "synthetic-é",
+            "x" * (fuxam.MAX_COOKIE_BYTES + 1),
+        ):
+            for command in (["context"], ["doctor"], ["auth", "status"]):
+                os.environ["FUXAM_COOKIE"] = value
+                with (
+                    self.subTest(command=command, length=len(value)),
+                    mock.patch.object(fuxam, "credential_store") as store,
+                    mock.patch.object(fuxam.urllib.request, "build_opener") as network,
+                    self.assertRaisesRegex(fuxam.FuxamError, "malformed") as raised,
+                ):
+                    fuxam.run(
+                        fuxam.build_parser().parse_args(["--auth", "env", *command])
+                    )
+                self.assertNotIn("synthetic", str(raised.exception))
+                self.assertNotIn("FUXAM_COOKIE", os.environ)
+                store.assert_not_called()
+                network.assert_not_called()
+
+    def test_environment_cookie_is_pinned_across_read_retry_and_sent_only_to_clerk(
+        self,
+    ) -> None:
+        os.environ["FUXAM_COOKIE"] = "__client=synthetic-original-cookie"
+        error = urllib.error.HTTPError(
+            "https://fuxam.app/api/synthetic", 401, "Unauthorized", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        responses = iter(
+            [
+                *synthetic_session(),
+                error,
+                *synthetic_session(),
+                FakeResponse(b"[]"),
+            ]
+        )
+        opener = mock.Mock()
+
+        def respond(request, timeout):
+            if opener.open.call_count == 1:
+                self.assertNotIn("FUXAM_COOKIE", os.environ)
+                os.environ["FUXAM_COOKIE"] = "synthetic-replacement-cookie"
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        opener.open.side_effect = respond
+        with (
+            mock.patch.object(fuxam, "credential_store") as store,
+            mock.patch.object(fuxam.FuxamClient, "context", return_value={}),
+            mock.patch.object(
+                fuxam.urllib.request, "build_opener", return_value=opener
+            ),
+        ):
+            result = fuxam.run(
+                fuxam.build_parser().parse_args(["--auth", "env", "pinned"])
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(opener.open.call_count, 6)
+        store.assert_not_called()
+        for call in opener.open.call_args_list:
+            request = call.args[0]
+            if urllib.parse.urlsplit(request.full_url).hostname == "clerk.fuxam.app":
+                self.assertEqual(
+                    request.get_header("Cookie"), "__client=synthetic-original-cookie"
+                )
+                self.assertIsNone(request.get_header("Authorization"))
+            else:
+                self.assertIsNone(request.get_header("Cookie"))
+                self.assertIsNotNone(request.get_header("Authorization"))
+
+    def test_environment_refresh_still_rejects_account_changes(self) -> None:
+        for user, organization in (
+            ("other-user", "original-organization"),
+            ("original-user", "other-organization"),
+        ):
+            opener = mock.Mock()
+            opener.open.side_effect = [
+                *synthetic_session("original-user", "original-organization"),
+                *synthetic_session(user, organization),
+            ]
+            with (
+                self.subTest(user=user, organization=organization),
+                mock.patch.object(fuxam, "credential_store") as store,
+                mock.patch.object(
+                    fuxam.urllib.request, "build_opener", return_value=opener
+                ),
+            ):
+                client = fuxam.FuxamClient(cookie="synthetic-cookie")
+                client._session_token()
+                with self.assertRaisesRegex(fuxam.FuxamError, "ACCOUNT_CHANGED"):
+                    client._session_token(force=True)
+                self.assertEqual(client.user_id, "original-user")
+                self.assertEqual(client.organization_id, "original-organization")
+                store.assert_not_called()
+
+    def test_environment_booking_cli_rechecks_account_and_verifies_one_mutation(
+        self,
+    ) -> None:
+        user, organization = "student-original", "organization-original"
+        cookie = "synthetic-original-cookie"
+        mutations = []
+        term_reads = []
+        action_ids = {
+            "checkCourseConflictsAction": "c" * 40,
+            "bookCoursesAction": "b" * 40,
+        }
+
+        def respond(request, timeout):
+            self.assertEqual(timeout, 30)
+            self.assertNotIn("FUXAM_COOKIE", os.environ)
+            url = urllib.parse.urlsplit(request.full_url)
+            if url.hostname == "clerk.fuxam.app":
+                self.assertEqual(request.get_header("Cookie"), f"__client={cookie}")
+                self.assertIsNone(request.get_header("Authorization"))
+                session = synthetic_session(user, organization)
+                if url.path == "/v1/client":
+                    return session[0]
+                if url.path == "/v1/client/sessions/sess_synthetic/tokens":
+                    return session[1]
+            else:
+                self.assertEqual(url.hostname, "fuxam.app")
+                self.assertIsNone(request.get_header("Cookie"))
+                token = request.get_header("Authorization").removeprefix("Bearer ")
+                self.assertEqual(fuxam.jwt_claims(token)["sub"], user)
+                if url.path == "/api/user/get-institutions-user-has-access-to":
+                    return FakeResponse(b'[{"slug":"code"}]')
+                if url.path == "/api/calendar/cohorts-for-filters":
+                    return FakeResponse(
+                        b'[{"id":"cohort-synthetic","studyProgramVersionId":"program-synthetic"}]'
+                    )
+                if url.path == "/api/build-id":
+                    return FakeResponse(b'{"buildId":"build-synthetic"}')
+                if url.path.endswith("/my-term"):
+                    term_reads.append(bool(mutations))
+                    return FakeResponse(
+                        synthetic_term_html(
+                            synthetic_term_after("enroll")
+                            if mutations
+                            else synthetic_term_payload()
+                        )
+                    )
+                if url.path.endswith("/my-courses"):
+                    if request.get_method() == "GET":
+                        return FakeResponse(
+                            b'<script src="/_next/static/chunks/synthetic.js"></script>'
+                        )
+                    action_id = request.get_header("Next-action")
+                    if action_id == action_ids["checkCourseConflictsAction"]:
+                        return FakeResponse(b'0:{"a":"$@1"}\n1:[]\n')
+                    if action_id == action_ids["bookCoursesAction"]:
+                        self.assertEqual(json.loads(request.data), [["course-open"]])
+                        self.assertEqual(mutations, [])
+                        mutations.append(request)
+                        return FakeResponse(b'0:{"a":"$@1"}\n1:{"ok":true}\n')
+                if url.path == "/_next/static/chunks/synthetic.js":
+                    script = "\n".join(
+                        f'createServerReference)("{action_id}",null,null,"{name}")'
+                        for name, action_id in action_ids.items()
+                    )
+                    return FakeResponse(script.encode())
+            raise AssertionError(f"Unexpected synthetic request: {url.path}")
+
+        def run_cli(*arguments):
+            os.environ["FUXAM_COOKIE"] = cookie
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(
+                    fuxam.sys, "argv", [str(SCRIPT), "--auth", "env", *arguments]
+                ),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = fuxam.main()
+            output, error = stdout.getvalue(), stderr.getvalue()
+            self.assertNotIn(cookie, output + error)
+            self.assertEqual(output if code else error, "")
+            return code, json.loads(error if code else output)
+
+        opener = mock.Mock()
+        opener.open.side_effect = respond
+        with (
+            mock.patch.object(
+                fuxam,
+                "credential_store",
+                side_effect=AssertionError("Temporary login opened a keyring."),
+            ) as store,
+            mock.patch.object(
+                fuxam.urllib.request, "build_opener", return_value=opener
+            ),
+        ):
+            code, preview = run_cli("booking", "enroll", "course-open")
+            self.assertEqual(code, 0)
+            self.assertEqual(preview["mode"], "preview")
+            self.assertFalse(preview["changed"])
+            self.assertEqual(mutations, [])
+            fingerprint = preview["confirmationFingerprint"]
+            apply = ("booking", "enroll", "course-open", "--apply")
+
+            code, result = run_cli(*apply)
+            self.assertEqual(code, 1)
+            self.assertIn("CONFIRMATION_REQUIRED", result["error"])
+            self.assertEqual(mutations, [])
+
+            for user, organization in (
+                ("student-other", "organization-original"),
+                ("student-original", "organization-other"),
+            ):
+                with self.subTest(user=user, organization=organization):
+                    cookie = "synthetic-other-cookie"
+                    code, result = run_cli(*apply, "--confirm", fingerprint)
+                    self.assertEqual(code, 1)
+                    self.assertIn("STALE_PREVIEW", result["error"])
+                    self.assertEqual(mutations, [])
+
+            user, organization = "student-original", "organization-original"
+            cookie = "synthetic-original-cookie"
+            term_reads.clear()
+            code, result = run_cli(*apply, "--confirm", fingerprint)
+            self.assertEqual(code, 0)
+            self.assertEqual(result["result"], "verified-success")
+            self.assertEqual(result["verifiedState"], "ENROLLED")
+            self.assertTrue(result["changed"])
+            self.assertEqual(len(mutations), 1)
+            self.assertEqual(term_reads, [False, False, True])
+            store.assert_not_called()
+
+
 class CredentialAndNetworkTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal semantics.")
     def test_auth_set_real_getpass_rejects_a_process_without_a_controlling_tty(
@@ -3368,6 +3706,7 @@ class SkillMetadataTests(unittest.TestCase):
             "io",
             "json",
             "math",
+            "os",
             "re",
             "shutil",
             "subprocess",
