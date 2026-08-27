@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.1 — Unreleased
+## 0.4.1 — 2026-08-27
 
 - Refuse credential entry when a terminal cannot hide input, and stop commands if the signed-in user or organization changes.
 - Reconcile unexpected booking-response and verification failures without retrying a mutation.

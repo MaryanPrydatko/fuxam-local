@@ -1,6 +1,6 @@
 # Fuxam Local: testing update
 
-27 August 2026 · Validation snapshot · Unreleased changes
+27 August 2026 · v0.4.1 validation
 
 ![Fuxam Local offline validation: 153 tests on three Python versions; 452,574 repeated synthetic stress executions; guarded booking behavior checked. No real bookings tested.](2026-08-27-testing.png)
 
@@ -10,11 +10,11 @@ Small engineering update on Fuxam Local, my local CLI + skill for using Fuxam fr
 
 Testing caught some real bugs: malformed server data could produce unhandled errors, a non-ASCII booking confirmation could crash, and conflicting term IDs needed to be rejected. Those cases now have regression coverage.
 
-The current local build passes **153 tests on each of three Python versions**. The recorded stress runs add **452,574 synthetic executions**: 444,426 parser checks and 8,148 booking scenarios. That includes repeated runs across two seeds and three runtimes—not 452,574 unique tests.
+The v0.4.1 build passes **153 tests on each of three Python versions**. The recorded stress runs add **452,574 synthetic executions**: 444,426 parser checks and 8,148 booking scenarios. That includes repeated runs across two seeds and three runtimes—not 452,574 unique tests.
 
 The booking checks exercise the failure paths: invalid confirmations must not send a change, a scenario must never make more than one write attempt, and an uncertain result must stop for verification instead of being retried automatically.
 
-This is offline evidence, not a bug-free promise. No real bookings were changed. Live Fuxam behavior and agent approval handling still need end-to-end checks. These hardening changes have not been released yet.
+The test matrix is offline evidence, not a bug-free promise. A separate read-only check also passed against Fuxam before release. That checks current authentication and response shapes, not every workflow or any live booking change. No enrollments or other academic records were changed.
 
 ## What the numbers mean
 
@@ -32,7 +32,13 @@ Synthetic fixtures and mocked/guarded external access were used. Stress reports 
 
 Term probes also confirmed that `Fall 2026`, `fall semester 2026` and `FS26` resolve to `FS26`. `Spring 2026` and `SS26` resolve to `SS26`. Bare `fall` and `Spring2026` without a space are rejected rather than guessed.
 
-This does not establish live authentication, native Keychain integration, real enrollment/waitlist behavior, every agent's consent handling, or compatibility with future Fuxam changes.
+These offline results alone do not establish live compatibility. Real enrollment/waitlist changes, every agent's consent handling, and compatibility with future Fuxam changes remain unverified.
+
+## Live read-only release check
+
+On 27 August 2026, the same CLI source passed `doctor`, the quick smoke check (4/4), and the deep smoke check (6/6) using an existing macOS Keychain credential. The checks exercised authentication, context, older enrollment records, study-plan data, agenda data, the active-term page, and one catalog page through the dynamically resolved read action. The deep check repeats the four quick checks; these are not ten distinct checks.
+
+Only redacted pass/fail results and response shapes were retained. No academic records or credentials were added to the repository. No live mutation was attempted, and no human approval flow was tested end to end. This establishes compatibility for that account at that moment, not a guarantee for every account or future API version.
 
 ## Repeat the repository checks
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title description">
   <title id="title">Fuxam Local: tested beyond the happy path</title>
-  <desc id="description">Offline validation of a local, unreleased build. All 153 tests passed on Python 3.10.14, 3.13.9 and 3.14.5. Recorded stress runs total 452,574 synthetic executions: 444,426 parser checks and 8,148 booking scenarios. Two seeds and three runtimes, with repeated cases included. Booking safeguards cover preview, approval, rechecking, sending at most once and readback. No real bookings were tested; passing tests are not a guarantee against bugs.</desc>
+  <desc id="description">Offline validation of Fuxam Local v0.4.1. All 153 tests passed on Python 3.10.14, 3.13.9 and 3.14.5. Recorded stress runs total 452,574 synthetic executions: 444,426 parser checks and 8,148 booking scenarios. Two seeds and three runtimes, with repeated cases included. Booking safeguards cover preview, approval, rechecking, sending at most once and readback. No real bookings were tested; passing tests are not a guarantee against bugs.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 0 L 8 4 L 0 8 Z" fill="#62716A"/>
@@ -19,7 +19,7 @@
   <rect width="12" height="1200" fill="#205D43"/>
 
   <text x="80" y="76" class="label green">FUXAM LOCAL / ENGINEERING UPDATE</text>
-  <text x="1520" y="76" text-anchor="end" class="mono muted" font-size="18">DRAFT · 27 AUG 2026</text>
+  <text x="1520" y="76" text-anchor="end" class="mono muted" font-size="18">v0.4.1 · 27 AUG 2026</text>
   <text x="76" y="166" font-size="66" font-weight="650" letter-spacing="-2">Tested beyond the happy path.</text>
   <text x="80" y="215" font-size="26" class="muted">Local validation of the CLI, booking guards and agent skill.</text>
   <line x1="80" y1="259" x2="1520" y2="259" class="rule"/>
@@ -89,6 +89,6 @@
   <line x1="80" y1="1027" x2="1520" y2="1027" class="rule"/>
   <text x="80" y="1073" font-size="25" font-weight="600">Offline fixtures. No real bookings tested.</text>
   <text x="80" y="1112" font-size="22" class="muted">Passing tests reduce risk; live API changes and agent behavior still need checks.</text>
-  <text x="80" y="1160" font-size="17" class="mono muted">LOCAL SOURCE 527cd9e03cbd · UNRELEASED</text>
+  <text x="80" y="1160" font-size="17" class="mono muted">SOURCE 527cd9e03cbd · OFFLINE MATRIX</text>
   <text x="1520" y="1160" text-anchor="end" font-size="18" class="muted">Methodology and limits in the accompanying notes.</text>
 </svg>
