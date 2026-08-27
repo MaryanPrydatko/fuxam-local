@@ -34,7 +34,7 @@ from fuxam_protocol import (
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"

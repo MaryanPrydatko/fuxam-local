@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-08-27
 
 - Separate response decoding from the CLI.
 - Test installed commands through shared and aliased skill paths.
