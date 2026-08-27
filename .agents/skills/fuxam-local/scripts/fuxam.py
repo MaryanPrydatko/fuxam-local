@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import re
 import sys
 import time
@@ -18,6 +19,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
@@ -25,7 +27,7 @@ from typing import Any
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 USER_AGENT = f"fuxam-local/{VERSION}"
 KEYCHAIN_SERVICE = b"codex-fuxam-local"
 KEYCHAIN_ACCOUNT = b"__client"
@@ -34,6 +36,9 @@ MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_COOKIE_BYTES = 16 * 1024
 MAX_EXPLORE_PAGES = 100
 MAX_SCRIPT_SOURCES = 128
+MAX_FLIGHT_DEPTH = 64
+MAX_FLIGHT_NODES = 200_000
+MAX_FLIGHT_STRING_BYTES = MAX_RESPONSE_BYTES
 READ_ONLY_ACTIONS = frozenset(
     {
         "checkCourseConflictsAction",
@@ -126,7 +131,6 @@ def validate_smoke_response(
     *,
     require_object: bool = False,
     required_fields: tuple[str, ...] = (),
-    any_field: tuple[str, ...] = (),
 ) -> str:
     if require_object:
         if not isinstance(value, dict):
@@ -141,8 +145,6 @@ def validate_smoke_response(
             for field in required_fields
         ):
             raise FuxamError("Smoke response omitted required fields.")
-        if any_field and not any(field in value for field in any_field):
-            raise FuxamError("Smoke response omitted its expected payload fields.")
     return "object" if isinstance(value, dict) else "array"
 
 
@@ -166,7 +168,7 @@ def smoke_test(client: FuxamClient, *, deep: bool = False) -> dict[str, Any]:
         (
             "study-plan",
             lambda: client.study_plan(None, None),
-            validate_smoke_response,
+            lambda value: validate_study_plan(value) and "object",
         ),
         (
             "agenda",
@@ -185,11 +187,7 @@ def smoke_test(client: FuxamClient, *, deep: bool = False) -> dict[str, Any]:
                 (
                     "bookable-server-action",
                     lambda: client.bookable("", 1, 1),
-                    lambda value: validate_smoke_response(
-                        value,
-                        require_object=True,
-                        any_field=("courses", "learningUnits", "pageCount"),
-                    ),
+                    lambda value: validate_bookable_page(value) and "object",
                 ),
             ]
         )
@@ -200,6 +198,8 @@ def smoke_test(client: FuxamClient, *, deep: bool = False) -> dict[str, Any]:
             value = check()
             response_type = validate(value)
             reports.append({"name": name, "ok": True, "shape": {"type": response_type}})
+        except MutationPreconditionChanged:
+            raise
         except (FuxamError, json.JSONDecodeError):
             reports.append({"name": name, "ok": False, "error": "FUXAM_CHECK_FAILED"})
         except Exception:
@@ -792,49 +792,97 @@ def _study_item_terms(
     return terms, conflict, unresolved
 
 
+def validate_study_plan(value: Any) -> dict[str, Any]:
+    response = as_object(value, "study plan")
+    if (
+        "error" in response
+        or not isinstance(response.get("availableTerms"), list)
+        or not isinstance(response.get("electiveGroups"), list)
+    ):
+        raise FuxamError("Fuxam returned unsupported study-plan data.")
+    term_names_by_id: dict[str, str] = {}
+    for term in response["availableTerms"]:
+        if (
+            not isinstance(term, dict)
+            or not isinstance(term.get("id"), str)
+            or not term["id"]
+            or not isinstance(term.get("name"), str)
+            or not term["name"]
+        ):
+            raise FuxamError("Fuxam returned unsupported study-plan term data.")
+        name = _term_or_none(term["name"]) or term["name"]
+        if term["id"] in term_names_by_id and term_names_by_id[term["id"]] != name:
+            raise FuxamError("Fuxam returned conflicting study-plan term data.")
+        term_names_by_id[term["id"]] = name
+    for group in response["electiveGroups"]:
+        if not isinstance(group, dict) or not isinstance(
+            group.get("availableStudyPlanItems"), list
+        ):
+            raise FuxamError("Fuxam returned unsupported study-plan group data.")
+        for item in group["availableStudyPlanItems"]:
+            if not isinstance(item, dict) or type(item.get("isElected")) is not bool:
+                raise FuxamError("Fuxam returned unsupported study-plan election data.")
+    return response
+
+
+def validate_bookable_page(value: Any) -> dict[str, Any]:
+    response = as_object(value, "bookable courses")
+    page_count = response.get("pageCount")
+    if type(page_count) is not int or page_count < 0:
+        raise FuxamError("Fuxam returned an invalid catalog page count.")
+    fields = [field for field in ("courses", "learningUnits") if field in response]
+    if "error" in response or not fields:
+        raise FuxamError("Fuxam returned unsupported catalog data.")
+    for field in fields:
+        values = response[field]
+        if not isinstance(values, list) or any(
+            not isinstance(course, dict)
+            or not isinstance(course.get("id"), str)
+            or not course["id"].strip()
+            for course in values
+        ):
+            raise FuxamError("Fuxam returned unsupported catalog course data.")
+    courses = response[fields[0]]
+    if any(response[field] != courses for field in fields[1:]):
+        raise FuxamError("Fuxam returned conflicting catalog collections.")
+    total_count = response.get("totalCount")
+    if "totalCount" in response and (
+        type(total_count) is not int or total_count < len(courses)
+    ):
+        raise FuxamError("Fuxam returned an invalid catalog total count.")
+    if page_count == 0 and (courses or total_count not in (None, 0)):
+        raise FuxamError("Fuxam returned contradictory empty catalog data.")
+    if (
+        page_count == 1
+        and total_count is not None
+        and total_count != len({course["id"] for course in courses})
+    ):
+        raise FuxamError("Fuxam returned an inconsistent catalog total count.")
+    return {"pageCount": page_count, "totalCount": total_count, "courses": courses}
+
+
 def summarize_modules(value: Any, term: str | None = None) -> dict[str, Any]:
     """Return formal study-plan elections, optionally narrowed to one term."""
-    response = as_object(value, "study plan")
     target = canonical_term(term) if term is not None else None
+    response = validate_study_plan(value)
     term_names_by_id: dict[str, str] = {}
     available_terms: list[str] = []
     schema_issues = 0
-    terms = response.get("availableTerms", [])
-    if isinstance(terms, list):
-        for available in terms:
-            if not isinstance(available, dict):
-                schema_issues += 1
-                continue
-            term_id = available.get("id")
-            code = _term_or_none(available.get("name"))
-            if isinstance(term_id, str) and code:
-                term_names_by_id[term_id] = code
-            elif term_id is not None or available.get("name") is not None:
-                schema_issues += 1
-            if code and code not in available_terms:
+    for available in response["availableTerms"]:
+        code = _term_or_none(available["name"])
+        if code:
+            term_names_by_id[available["id"]] = code
+            if code not in available_terms:
                 available_terms.append(code)
-    else:
-        schema_issues += 1
+        else:
+            schema_issues += 1
     modules: list[dict[str, Any]] = []
     conflicts = 0
     unresolved_terms = 0
     unreadable_elections = 0
-    groups = response.get("electiveGroups", [])
-    if not isinstance(groups, list):
-        raise FuxamError("Fuxam returned unsupported study-plan data.")
-    for group in groups:
-        if not isinstance(group, dict):
-            schema_issues += 1
-            continue
-        items = group.get("availableStudyPlanItems", [])
-        if not isinstance(items, list):
-            schema_issues += 1
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                schema_issues += 1
-                continue
-            if item.get("isElected") is not True:
+    for group in response["electiveGroups"]:
+        for item in group["availableStudyPlanItems"]:
+            if not item["isElected"]:
                 continue
             item_terms, conflict, unresolved = _study_item_terms(item, term_names_by_id)
             if conflict:
@@ -1079,17 +1127,35 @@ def render_terminal_result(command: str, result: dict[str, Any]) -> str:
     raise FuxamError("Table output is unavailable for this command.")
 
 
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Non-finite JSON numbers are unsupported.")
+    return number
+
+
 def jwt_claims(token: str) -> dict[str, Any]:
     try:
         segment = token.split(".")[1]
         segment += "=" * (-len(segment) % 4)
-        return as_object(json.loads(base64.urlsafe_b64decode(segment)), "token")
-    except (IndexError, ValueError, json.JSONDecodeError) as exc:
+        return as_object(
+            json.loads(
+                base64.urlsafe_b64decode(segment),
+                parse_float=_finite_json_float,
+                parse_constant=_finite_json_float,
+            ),
+            "token",
+        )
+    except (IndexError, ValueError, RecursionError) as exc:
         raise FuxamError("Clerk returned an invalid session token.") from exc
 
 
-def parse_flight(body: bytes) -> Any:
-    records: dict[str, str] = {}
+def _flight_records(body: bytes) -> dict[str, tuple[str, str]]:
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise FuxamError("Fuxam returned unexpectedly large action data.")
+    records: dict[str, tuple[str, str]] = {}
+    header_pattern = re.compile(rb"([0-9a-f]+):")
+    text_pattern = re.compile(rb"T([0-9a-f]+),")
     offset = 0
     try:
         while offset < len(body):
@@ -1097,56 +1163,128 @@ def parse_flight(body: bytes) -> Any:
                 offset += 1
             if offset >= len(body):
                 break
-            colon = body.find(b":", offset)
-            if colon < 0:
+            header = header_pattern.match(body, offset)
+            if header is None:
                 raise FuxamError("Fuxam returned malformed action data.")
-            record_id = body[offset:colon].decode("ascii")
-            if not record_id or record_id in records:
+            record_id = header.group(1).decode("ascii")
+            if record_id in records:
                 raise FuxamError("Fuxam returned malformed action data.")
-            offset = colon + 1
+            if len(records) >= MAX_FLIGHT_NODES:
+                raise FuxamError("Fuxam returned unexpectedly complex action data.")
+            offset = header.end()
             if offset < len(body) and body[offset] == ord("T"):
-                comma = body.find(b",", offset + 1)
-                if comma < 0:
+                text_header = text_pattern.match(body, offset)
+                if text_header is None:
                     raise FuxamError("Fuxam returned malformed action data.")
-                byte_length = int(body[offset + 1 : comma], 16)
-                start = comma + 1
+                byte_length = int(text_header.group(1), 16)
+                start = text_header.end()
                 if byte_length > len(body) - start:
                     raise FuxamError("Fuxam returned truncated action data.")
                 end = start + byte_length
-                records[record_id] = body[start:end].decode("utf-8")
+                records[record_id] = ("text", body[start:end].decode("utf-8"))
                 offset = end
             else:
+                # Binary rows need length framing; never scan them as model JSON.
+                if offset < len(body) and body[offset] in b"AOoUSsLlGgMmV":
+                    raise FuxamError("Fuxam returned unsupported binary action data.")
                 newline = body.find(b"\n", offset)
                 end = len(body) if newline < 0 else newline
-                records[record_id] = body[offset:end].decode("utf-8").rstrip("\r")
+                records[record_id] = (
+                    "model",
+                    body[offset:end].decode("utf-8").rstrip("\r"),
+                )
                 offset = len(body) if newline < 0 else newline + 1
     except (UnicodeDecodeError, ValueError) as exc:
         raise FuxamError("Fuxam returned malformed action data.") from exc
-    try:
-        root = as_object(json.loads(records["0"]), "action")
-        match = re.fullmatch(r"\$@(.+)", str(root.get("a", "")))
-        if not match or match.group(1) not in records:
-            raise KeyError
-        payload = records[match.group(1)]
-        if payload.startswith("E"):
-            raise FuxamError("Fuxam rejected the action request.")
-        value = json.loads(payload)
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
-        raise FuxamError("Fuxam returned unsupported action data.") from exc
+    return records
 
-    def resolve(item: Any) -> Any:
-        if item == "$undefined":
-            return None
+
+def parse_flight(body: bytes) -> Any:
+    """Decode the JSON/text subset of React Flight used by Fuxam actions."""
+    records = _flight_records(body)
+    decoded: dict[str, Any] = {}
+    active: set[str] = set()
+    nodes = 0
+    string_bytes = 0
+
+    def spend(depth: int, text: str | None = None) -> None:
+        nonlocal nodes, string_bytes
+        nodes += 1
+        if text is not None:
+            string_bytes += len(text.encode("utf-8"))
+        if (
+            depth > MAX_FLIGHT_DEPTH
+            or nodes > MAX_FLIGHT_NODES
+            or string_bytes > MAX_FLIGHT_STRING_BYTES
+        ):
+            raise FuxamError("Fuxam returned unexpectedly complex action data.")
+
+    def model(record_id: str) -> Any:
+        if record_id not in records or records[record_id][0] != "model":
+            raise FuxamError("Fuxam returned unsupported action data.")
+        if record_id not in decoded:
+            payload = records[record_id][1]
+            if payload.startswith("E"):
+                raise FuxamError("Fuxam rejected the action request.")
+            decoded[record_id] = json.loads(
+                payload,
+                parse_float=_finite_json_float,
+                parse_constant=_finite_json_float,
+            )
+        return decoded[record_id]
+
+    def resolve_record(record_id: str, depth: int) -> Any:
+        if record_id not in records or record_id in active:
+            raise FuxamError("Fuxam returned an unresolved or cyclic action reference.")
+        if depth > MAX_FLIGHT_DEPTH:
+            raise FuxamError("Fuxam returned unexpectedly complex action data.")
+        kind, payload = records[record_id]
+        if kind == "text":
+            spend(depth, payload)
+            return payload
+        active.add(record_id)
+        try:
+            # Expand each occurrence: caching resolved trees hides explosive DAGs.
+            return resolve(model(record_id), depth)
+        finally:
+            active.remove(record_id)
+
+    def resolve(item: Any, depth: int) -> Any:
+        spend(depth, item if isinstance(item, str) else None)
         if isinstance(item, str):
+            if item.startswith("$$"):
+                return item[1:]
+            if item == "$undefined":
+                return None
             match = re.fullmatch(r"\$([0-9a-f]+)", item)
-            return records.get(match.group(1), item) if match else item
+            if match:
+                return resolve_record(match.group(1), depth + 1)
+            if item.startswith("$"):
+                raise FuxamError("Fuxam returned an unsupported action value.")
+            return item
         if isinstance(item, list):
-            return [resolve(child) for child in item]
+            return [resolve(child, depth + 1) for child in item]
         if isinstance(item, dict):
-            return {key: resolve(child) for key, child in item.items()}
+            result = {}
+            for key, child in item.items():
+                spend(depth + 1, key)
+                result[key] = resolve(child, depth + 1)
+            return result
         return item
 
-    return resolve(value)
+    try:
+        root = as_object(model("0"), "action")
+        action = root.get("a")
+        match = (
+            re.fullmatch(r"\$@([0-9a-f]+)", action) if isinstance(action, str) else None
+        )
+        if match is None:
+            raise FuxamError("Fuxam returned unsupported action data.")
+        return resolve_record(match.group(1), 0)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise FuxamError(
+            "Fuxam returned unsupported or overly complex action data."
+        ) from exc
 
 
 class _FlightScriptParser(HTMLParser):
@@ -1209,7 +1347,9 @@ def parse_term_page(body: bytes) -> dict[str, Any]:
         raise FuxamError("Fuxam returned unexpectedly complex term page data.")
     flight_chunks: list[str] = []
     push_marker = "self.__next_f.push("
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(
+        parse_float=_finite_json_float, parse_constant=_finite_json_float
+    )
     push_count = 0
     for script in parser.scripts:
         cursor = 0
@@ -1223,7 +1363,7 @@ def parse_term_page(body: bytes) -> dict[str, Any]:
                 value_start += 1
             try:
                 push, value_end = decoder.raw_decode(script, value_start)
-            except json.JSONDecodeError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise FuxamError("Fuxam returned malformed term page data.") from exc
             while value_end < len(script) and script[value_end].isspace():
                 value_end += 1
@@ -1252,7 +1392,10 @@ def parse_term_page(body: bytes) -> dict[str, Any]:
             if not script.startswith(push_marker, cursor):
                 raise FuxamError("Fuxam returned malformed term page data.")
 
-    stream = "".join(flight_chunks).encode("utf-8")
+    try:
+        stream = "".join(flight_chunks).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise FuxamError("Fuxam returned malformed term page data.") from exc
     matches: list[dict[str, Any]] = []
     offset = 0
     # Next page streams include empty-ID control lines; unlike action responses,
@@ -1289,11 +1432,15 @@ def parse_term_page(body: bytes) -> dict[str, Any]:
             if not stripped.startswith((b"{", b"[")):
                 continue
             try:
-                value = json.loads(stripped)
+                value = json.loads(
+                    stripped,
+                    parse_float=_finite_json_float,
+                    parse_constant=_finite_json_float,
+                )
             except json.JSONDecodeError as exc:
                 raise FuxamError("Fuxam returned malformed term page data.") from exc
             matches.extend(_find_term_payloads(value))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise FuxamError("Fuxam returned malformed term page data.") from exc
     if len(matches) != 1:
         raise FuxamError(
@@ -1487,19 +1634,26 @@ class FuxamClient:
         if not isinstance(token, str):
             raise FuxamError("Clerk returned no session token.")
         claims = jwt_claims(token)
-        if not isinstance(claims.get("sub"), str) or not isinstance(
-            claims.get("exp"), int | float
-        ):
+        expiry = claims.get("exp")
+        if not isinstance(claims.get("sub"), str) or type(expiry) not in (int, float):
             raise FuxamError("The Clerk token is missing identity or expiry data.")
+        try:
+            token_expires_at = float(expiry)
+        except OverflowError as exc:
+            raise FuxamError("The Clerk token has an invalid expiry.") from exc
+        if not math.isfinite(token_expires_at):
+            raise FuxamError("The Clerk token has an invalid expiry.")
         if self.user_id and (
             self.user_id != claims["sub"] or self.organization_id != organization_id
         ):
-            self.context_cache = None
-            self.actions.clear()
+            raise MutationPreconditionChanged(
+                "ACCOUNT_CHANGED: the signed-in Fuxam account changed. "
+                "Start a new command for the intended account."
+            )
         self.user_id = claims["sub"]
         self.organization_id = organization_id
         self.token = token
-        self.token_expires_at = float(claims["exp"])
+        self.token_expires_at = token_expires_at
         return token
 
     def context(self) -> dict[str, str]:
@@ -1855,7 +2009,8 @@ class FuxamClient:
             )
         except MutationPreconditionChanged:
             raise
-        except (FuxamError, json.JSONDecodeError, KeyboardInterrupt) as exc:
+        except (Exception, KeyboardInterrupt) as exc:
+            # Response/decoder failures do not prove the write was rejected.
             raise MutationOutcomeUnknown() from exc
 
     def bookable(self, search: str, page: int, per_page: int) -> Any:
@@ -1944,11 +2099,15 @@ class FuxamClient:
         for section, action, arguments in calls:
             try:
                 sections[section] = self._action(action, arguments, page)
+            except MutationPreconditionChanged:
+                raise
             except FuxamError:
                 sections[section] = None
                 failures.append(section)
         try:
             sections["attempts"] = self.module_attempts(module_version_id)
+        except MutationPreconditionChanged:
+            raise
         except FuxamError:
             sections["attempts"] = None
             failures.append("attempts")
@@ -1965,23 +2124,34 @@ class FuxamClient:
         study_plan: Any = None
         warnings: list[str] = []
         try:
-            study_plan = self.study_plan(None, None)
+            study_plan = validate_study_plan(self.study_plan(None, None))
+        except MutationPreconditionChanged:
+            raise
         except FuxamError:
             warnings.append("studyPlan unavailable")
-        first = as_object(self.bookable(query, 1, 100), "bookable courses")
-        page_count = first.get("pageCount", 1)
-        if type(page_count) is not int or not 0 <= page_count <= MAX_EXPLORE_PAGES:
+        first = validate_bookable_page(self.bookable(query, 1, 100))
+        page_count = first["pageCount"]
+        if page_count > MAX_EXPLORE_PAGES:
             raise FuxamError("Fuxam returned an invalid catalog page count.")
         pages = [first] if page_count else []
         for page in range(2, page_count + 1):
-            pages.append(as_object(self.bookable(query, page, 100), "bookable courses"))
+            current = validate_bookable_page(self.bookable(query, page, 100))
+            if (current["pageCount"], current["totalCount"]) != (
+                page_count,
+                first["totalCount"],
+            ):
+                raise FuxamError(
+                    "Fuxam catalog pagination changed during the read; run a new query."
+                )
+            pages.append(current)
         courses: dict[str, Any] = {}
         for page in pages:
-            values = page.get("courses", page.get("learningUnits", []))
-            if isinstance(values, list):
-                for course in values:
-                    if isinstance(course, dict) and isinstance(course.get("id"), str):
-                        courses[course["id"]] = course
+            for course in page["courses"]:
+                courses[course["id"]] = course
+        if first["totalCount"] is not None and len(courses) != first["totalCount"]:
+            raise FuxamError(
+                "Fuxam returned an inconsistent catalog total count; run a new query."
+            )
         return {
             "studyPlan": study_plan,
             "learningUnits": list(courses.values()),
@@ -2246,7 +2416,7 @@ def booking_workflow(
             "CONFIRMATION_REQUIRED: preview first, then pass --apply --confirm "
             "with its exact fingerprint."
         )
-    if not hmac.compare_digest(confirmation, fingerprint):
+    if not confirmation.isascii() or not hmac.compare_digest(confirmation, fingerprint):
         raise FuxamError(
             "STALE_PREVIEW: the confirmation does not match fresh Fuxam state."
         )
@@ -2279,7 +2449,7 @@ def booking_workflow(
         if verified_summary["termId"] != summary["termId"]:
             raise FuxamError("The active Fuxam term changed after the mutation.")
         verified_target = _booking_target(verified_summary, course_id)
-    except (FuxamError, KeyboardInterrupt) as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         raise FuxamError(
             "OUTCOME_UNKNOWN: Fuxam state could not be verified; inspect the official "
             "UI before trying again."
@@ -2481,9 +2651,17 @@ def run(args: argparse.Namespace) -> Any:
             }
         if args.operation == "clear":
             return {"removed": keychain.clear()}
-        value = normalize_client_cookie(
-            getpass.getpass("Fuxam __client value (hidden): ")
-        )
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                value = normalize_client_cookie(
+                    getpass.getpass("Fuxam __client value (hidden): ")
+                )
+        except getpass.GetPassWarning as exc:
+            raise FuxamError(
+                "Credential entry requires an interactive terminal with hidden "
+                "input. Run `fuxam.py auth set` directly in your terminal."
+            ) from exc
         keychain.set(value)
         return {"configured": True, "storage": "macOS Keychain"}
 

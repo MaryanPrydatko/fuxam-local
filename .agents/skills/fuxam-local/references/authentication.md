@@ -16,6 +16,8 @@ The user must complete setup themselves in a local terminal:
 
 6. Paste only the `__client` value into the hidden terminal prompt, then clear the clipboard.
 
+Run `auth set` directly in an interactive terminal. If the terminal cannot hide input, the CLI refuses to read the credential. Do not work around this with a pipe, argument, or environment variable.
+
 Verify without revealing the credential:
 
 ```sh

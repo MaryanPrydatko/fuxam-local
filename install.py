@@ -37,9 +37,15 @@ def path_exists(path: pathlib.Path) -> bool:
 
 
 def points_to(path: pathlib.Path, target: pathlib.Path) -> bool:
-    return path.is_symlink() and path.resolve(strict=False) == target.resolve(
-        strict=False
-    )
+    return path.resolve(strict=False) == target.resolve(strict=False)
+
+
+def unique_entries(paths: list[pathlib.Path]) -> list[pathlib.Path]:
+    # Resolve parent aliases, but preserve distinct leaf symlinks to the same target.
+    entries: dict[pathlib.Path, pathlib.Path] = {}
+    for path in sorted(paths):
+        entries.setdefault(path.parent.resolve(strict=False) / path.name, path)
+    return list(entries.values())
 
 
 def next_backup_path(home: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
@@ -68,7 +74,7 @@ def legacy_backup_paths(home: pathlib.Path) -> list[pathlib.Path]:
                 if path.name.startswith(LEGACY_BACKUP_PREFIX) and path_exists(path)
             )
         )
-    return backups
+    return unique_entries(backups)
 
 
 def next_legacy_backup_path(home: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
@@ -98,6 +104,7 @@ def install(
     canonical = home / CANONICAL_RELATIVE
     alias_paths = [home / relative for relative in ALIAS_RELATIVES] if aliases else []
     canonical_is_source = path_exists(canonical) and canonical.resolve() == source
+    replacing_canonical_link = canonical.is_symlink() and not canonical_is_source
 
     conflicts: list[pathlib.Path] = []
     if path_exists(canonical) and not canonical_is_source:
@@ -105,8 +112,10 @@ def install(
     conflicts.extend(
         alias
         for alias in alias_paths
-        if path_exists(alias) and not points_to(alias, canonical)
+        if path_exists(alias)
+        and (replacing_canonical_link or not points_to(alias, canonical))
     )
+    conflicts = unique_entries(conflicts)
     legacy_backups = legacy_backup_paths(home)
     paths_to_preserve = [*conflicts, *legacy_backups]
     if paths_to_preserve and not replace:

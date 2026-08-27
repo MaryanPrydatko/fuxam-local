@@ -5,6 +5,7 @@
 Fuxam Local renews short-lived Fuxam session tokens from Clerk's `__client` cookie. That cookie is equivalent to a password while valid.
 
 - Enter it only through `fuxam.py auth set`, which uses a hidden terminal prompt.
+- Setup refuses to read a credential if hidden input is unavailable; piped input is not a fallback.
 - Never put it in chat, source, issues, screenshots, shell arguments, or environment variables.
 - The value is stored in macOS Keychain under service `codex-fuxam-local` and account `__client`.
 - Clear it with `python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" auth clear`.
@@ -16,6 +17,7 @@ If a credential may have been exposed, clear it, sign out of Fuxam/Clerk session
 - Requests are limited to HTTPS on port 443 at `fuxam.app` and `clerk.fuxam.app`.
 - Bearer tokens may be sent only to `fuxam.app`; the Clerk cookie may be sent only to `clerk.fuxam.app`.
 - Redirects must retain the exact origin.
+- Each command stays bound to its first authenticated Clerk user and organization, including token refreshes and read retries.
 - Read and mutation server actions use separate fixed allowlists. Mutations are limited to enrolling, unenrolling, joining a waitlist, and leaving a waitlist.
 - A booking command previews one exact course ID by default. Applying it requires the matching fingerprint from a fresh preview, bound to the Clerk user and organization.
 - After frontend action discovery, the CLI rechecks the exact booking state and relevant conflicts immediately before dispatch.
@@ -37,4 +39,4 @@ If a credential may have been exposed, clear it, sign out of Fuxam/Clerk session
 
 ## Reporting a vulnerability
 
-Do not include a real credential, session token, or raw academic record in a report. If this repository is published on GitHub, enable private vulnerability reporting and use that channel. Until then, contact the maintainer privately and provide a minimal synthetic reproduction.
+Use [GitHub's private vulnerability report form](https://github.com/MaryanPrydatko/fuxam-local/security/advisories/new). Include a minimal synthetic reproduction, affected version, and expected behavior. Never include a real credential, session token, or raw academic record. Do not disclose vulnerabilities in public issues.

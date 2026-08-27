@@ -24,6 +24,8 @@ Use the script relative to this skill directory. Never put a real credential in 
 
 The report contains only pass/fail status and response shapes. A passing test proves current compatibility for that account and moment; it cannot guarantee that Fuxam's private API will never change.
 
+Study-plan and catalog checks use the same schema validation as their summary commands. A deep check exercises one catalog page, not a full pagination run, every read command, or any live write.
+
 For a user-requested live workflow check, `learning-units --format table` is read-only. A `booking <operation> <course-id>` command without `--apply` may verify preview behavior for one eligible exact course ID; stop after confirming `mode: preview` and `changed: false`.
 
 Repository maintainers should also run the credential-free offline suite documented in the repository README. Never run authenticated checks in CI, and never pass `--apply` while testing.

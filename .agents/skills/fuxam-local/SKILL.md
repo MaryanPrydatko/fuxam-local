@@ -18,7 +18,7 @@ python3 "<skill-root>/scripts/fuxam.py" <command>
 
 Use the narrow evidence source for the question. `learning-units` is the authoritative active-term view and separates enrolled, waitlisted, self-study, bookable, and full units. `enrolled --term <term>` lists confirmed active-term enrollments and reports waitlist entries separately. If the requested term is not active, explain that live booking state is unavailable for it. `enrolled` without `--term` returns older learning-unit records whose `ACTIVE` status may persist after completion.
 
-For modules elected in a term, run `modules --term <term>`. Use `explore` for catalog planning, `agenda` for schedules, `module-details` for a shortlist, and `module-attempts` for concrete progress. JSON is the agent default; use `--format table` for human terminal output. Use `--help` for exact arguments.
+For modules elected in a term, run `modules --term <term>`. Use `study-plan` for curriculum evidence, `explore` for catalog planning, `agenda` for schedules, `module-details` for a shortlist, and `module-attempts` for concrete progress. JSON is the agent default; use `--format table` for human terminal output. Use `--help` for exact arguments.
 
 Keep every claim at its evidence level:
 
@@ -34,6 +34,8 @@ For “what learning units did I enroll in this term?”, use `enrolled --term <
 When a complete `modules --term` result is empty, say no formal module elections are recorded for that term; this does not mean the student took nothing. When results are incomplete, distinguish zero confirmed records from a confirmed zero.
 
 Keep credentials inside the hidden local Keychain prompt: never request, print, log, or summarize one in chat. When authentication is missing or expired, stop the data request and direct the user to [references/authentication.md](references/authentication.md). The user runs that interactive command themselves. For verification requests, follow [references/testing.md](references/testing.md).
+
+On `ACCOUNT_CHANGED`, stop and confirm the intended account before starting a new command. Do not combine results from the interrupted command with another account's data. A schema error means the data could not be verified, not that the student has no enrollments or elections.
 
 Treat all output as private academic data. Show only what answers the request. Do not save raw results unless the user asks.
 
