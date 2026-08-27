@@ -334,7 +334,7 @@ class InstallerTests(unittest.TestCase):
                 backups = [pathlib.Path(path) for path in result["backups"]]
                 for backup in backups[int(not linked_canonical) :]:
                     self.assertTrue(backup.is_symlink())
-                    self.assertEqual(backup.readlink(), outside)
+                    self.assertEqual(backup.resolve(), outside.resolve())
                 self.assertEqual((outside / "owned-by-user").read_text(), "outside")
                 self.assertTrue((canonical / "SKILL.md").is_file())
                 for alias in aliases:
@@ -463,7 +463,7 @@ class InstallerTests(unittest.TestCase):
             for path in result["migratedLegacyBackups"]:
                 backup = pathlib.Path(path)
                 self.assertTrue(backup.is_symlink())
-                self.assertEqual(backup.readlink(), outside)
+                self.assertEqual(backup.resolve(), outside.resolve())
             for path in legacy_paths:
                 self.assertFalse(path.is_symlink())
             self.assertEqual((outside / "owned-by-user").read_text(), "outside")
@@ -528,7 +528,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((codex / "owned-by-user").read_text(), "codex")
             self.assertEqual((legacy / "owned-by-user").read_text(), "legacy")
             self.assertTrue(claude_root.is_symlink())
-            self.assertEqual(claude_root.readlink(), canonical.parent)
+            self.assertEqual(claude_root.resolve(), canonical.parent.resolve())
             self.assertEqual(list((home / ".agents/backups/fuxam-local").iterdir()), [])
             self.assertEqual(list(canonical.parent.glob(".fuxam-local-install-*")), [])
 

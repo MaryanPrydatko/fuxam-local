@@ -1924,7 +1924,7 @@ class ServerActionContractTests(unittest.TestCase):
             fuxam.build_parser().parse_args(["bookable", "--page", "0"])
 
     def test_source_contains_no_telemetry_or_generic_raw_action_command(self) -> None:
-        source = SCRIPT.read_text().lower()
+        source = SCRIPT.read_text(encoding="utf-8").lower()
         forbidden = ("posthog", "analytics", "raw-action")
         for value in forbidden:
             with self.subTest(value=value):
@@ -3332,7 +3332,9 @@ class DiagnosticsTests(unittest.TestCase):
 
 class SkillMetadataTests(unittest.TestCase):
     def test_skill_has_minimal_valid_frontmatter(self) -> None:
-        skill = (ROOT / ".agents" / "skills" / "fuxam-local" / "SKILL.md").read_text()
+        skill = (ROOT / ".agents" / "skills" / "fuxam-local" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         self.assertTrue(skill.startswith("---\n"))
         frontmatter = skill.split("---", 2)[1]
         self.assertIn("\nname: fuxam-local\n", frontmatter)
@@ -3343,7 +3345,9 @@ class SkillMetadataTests(unittest.TestCase):
         local_modules = {path.stem for path in scripts.glob("*.py")}
         imports: set[str] = set()
         for path in scripts.glob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            for node in ast.walk(
+                ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            ):
                 if isinstance(node, ast.Import):
                     imports.update(alias.name.split(".")[0] for alias in node.names)
                 elif (
