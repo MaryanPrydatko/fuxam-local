@@ -6,7 +6,11 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import subprocess
+import sys
+import textwrap
 import unittest
 import urllib.error
 import urllib.parse
@@ -61,10 +65,12 @@ class FakeSmokeClient:
             raise AssertionError("Smoke test must use an empty search.")
         return [{"title": "private-course-title"}]
 
-    def study_plan(self, focus_id: str | None, term_id: str | None) -> dict[str, str]:
+    def study_plan(
+        self, focus_id: str | None, term_id: str | None
+    ) -> dict[str, object]:
         if focus_id is not None or term_id is not None:
             raise AssertionError("Smoke test must request the current plan.")
-        return {"plan": "private-study-plan"}
+        return synthetic_study_plan()
 
     def agenda(
         self, direction: str, cursor: str | None, limit: int, past: bool
@@ -76,10 +82,134 @@ class FakeSmokeClient:
     def bookable(self, search: str, page: int, per_page: int) -> dict[str, object]:
         if (search, page, per_page) != ("", 1, 1):
             raise AssertionError("Smoke test must use its bounded catalog request.")
-        return {"courses": [{"title": "private-bookable-course"}]}
+        return {
+            "pageCount": 250,
+            "totalCount": 250,
+            "courses": [{"id": "course-synthetic", "title": "private-bookable-course"}],
+        }
 
     def term_courses(self) -> dict[str, object]:
         return synthetic_term_payload()
+
+
+def synthetic_study_plan() -> dict[str, object]:
+    return {
+        "availableTerms": [{"id": "term-fs26", "name": "Fall 2026"}],
+        "electiveGroups": [
+            {"name": "private-study-plan", "availableStudyPlanItems": []}
+        ],
+    }
+
+
+def malformed_study_plans() -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = [
+        {},
+        {"availableTerms": []},
+        {"electiveGroups": []},
+        {"availableTerms": None, "electiveGroups": []},
+        {"availableTerms": [], "electiveGroups": {}},
+        {"availableTerms": [], "electiveGroups": [None]},
+        {"availableTerms": [], "electiveGroups": [{}]},
+        {"availableTerms": [], "electiveGroups": [{"availableStudyPlanItems": None}]},
+        {"availableTerms": [], "electiveGroups": [{"availableStudyPlanItems": [None]}]},
+    ]
+    terms = [None, [], 1, "private-invalid-term", {}, {"id": "private-term-id"}]
+    terms.append({"name": "Fall 2026"})
+    terms.extend(
+        {"id": "private-term-id", "name": "Fall 2026", field: value}
+        for field in ("id", "name")
+        for value in ("", None, 0, False, [], {})
+    )
+    cases.extend({"availableTerms": [term], "electiveGroups": []} for term in terms)
+    items = [{}] + [
+        {"isElected": flag} for flag in (None, 0, 1, "true", "false", {}, [])
+    ]
+    cases.extend(
+        {
+            "availableTerms": [],
+            "electiveGroups": [{"availableStudyPlanItems": [item]}],
+        }
+        for item in items
+    )
+    return cases
+
+
+def malformed_catalog_pages() -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = [
+        {},
+        {"pageCount": 1},
+        {"courses": []},
+        {"pageCount": 0, "courses": [{"id": "course-synthetic"}]},
+        {"pageCount": 0, "courses": [], "totalCount": 1},
+        {"pageCount": 1, "courses": [], "learningUnits": [{"id": "other"}]},
+        {
+            "pageCount": 1,
+            "courses": [{"id": "private-course-id"}],
+            "totalCount": 0,
+        },
+        {"pageCount": 1, "courses": [], "totalCount": 1},
+        {"pageCount": 1, "courses": [{"id": "course-a"}], "totalCount": 2},
+        {"pageCount": 1, "courses": [{"id": "course-a"}] * 2, "totalCount": 2},
+    ]
+    cases.extend(
+        {"pageCount": 1, "courses": value}
+        for value in (
+            None,
+            {},
+            "invalid",
+            [None],
+            [{}],
+            [{"id": ""}],
+            [{"id": "   "}],
+            [{"id": 1}],
+        )
+    )
+    cases.extend(
+        {"pageCount": value, "courses": []}
+        for value in (
+            None,
+            True,
+            False,
+            -1,
+            1.5,
+            "broken",
+            {},
+        )
+    )
+    cases.extend(
+        {"pageCount": 1, "courses": [], "totalCount": value}
+        for value in (None, True, -1, 1.5, "broken", {})
+    )
+    return cases
+
+
+def synthetic_session(
+    user_id: str = "student-synthetic",
+    organization_id: str | None = None,
+    *,
+    expiry: object = 2_000_000_000,
+) -> tuple[FakeResponse, FakeResponse]:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"sub": user_id, "exp": expiry}).encode()
+    ).rstrip(b"=")
+    token = ".".join(("header", payload.decode(), "signature"))
+    client = {
+        "response": {
+            "last_active_session_id": "sess_synthetic",
+            "sessions": [
+                {
+                    "id": "sess_synthetic",
+                    "status": "active",
+                    "last_active_organization_id": organization_id,
+                    "last_active_token": {"jwt": "synthetic-renewal-token"},
+                }
+            ],
+        }
+    }
+    return (
+        FakeResponse(json.dumps(client).encode()),
+        FakeResponse(json.dumps({"jwt": token}).encode()),
+    )
 
 
 def synthetic_course(
@@ -179,7 +309,7 @@ class ParsingTests(unittest.TestCase):
         body = (
             b'0:{"a":"$@1"}\n'
             b'1:{"ok":true,"message":"$2","missing":"$undefined"}\n'
-            b"2:ready\n"
+            b'2:"ready"\n'
         )
 
         self.assertEqual(
@@ -193,7 +323,142 @@ class ParsingTests(unittest.TestCase):
             b'0:{"a":"$@1"}\n' + b"1:T" + f"{len(payload):x}".encode() + b"," + payload
         )
 
-        self.assertEqual(fuxam.parse_flight(body), {"items": [1, 2]})
+        self.assertEqual(fuxam.parse_flight(body), payload.decode())
+
+    def test_flight_resolves_model_records_recursively(self) -> None:
+        body = (
+            b'0:{"a":"$@1","unrelated":"$L9"}\n'
+            b'1:{"object":"$2","list":"$3","again":"$2"}\n'
+            b'2:{"nested":true,"value":"$4"}\n'
+            b'3:["$4",null,4]\n4:"ready"\n'
+        )
+        self.assertEqual(
+            fuxam.parse_flight(body),
+            {
+                "object": {"nested": True, "value": "ready"},
+                "list": ["ready", None, 4],
+                "again": {"nested": True, "value": "ready"},
+            },
+        )
+
+    def test_flight_unescapes_model_strings_exactly_once(self) -> None:
+        body = (
+            b'0:{"a":"$@1"}\n'
+            b'1:["$$2","$$undefined","$$$2","$undefined","","ordinary"]\n'
+        )
+        self.assertEqual(
+            fuxam.parse_flight(body),
+            ["$2", "$undefined", "$$2", None, "", "ordinary"],
+        )
+
+    def test_flight_text_uses_utf8_byte_lengths_and_stays_literal(self) -> None:
+        value = '$$2\n0:{"a":"fake"}\né'
+        encoded = value.encode()
+        body = (
+            b'0:{"a":"$@1"}\n1:{"text":"$2","after":"$3"}\n'
+            + f"2:T{len(encoded):x},".encode()
+            + encoded
+            + b"3:true\n"
+        )
+        self.assertEqual(fuxam.parse_flight(body), {"text": value, "after": True})
+
+    def test_flight_rejects_dangling_cycles_and_unsupported_tags(self) -> None:
+        cases = (
+            b'1:{"value":"$2"}\n',
+            b'1:{"value":"$1"}\n',
+            b'1:"$2"\n2:"$1"\n',
+            b'1:{"value":"$Q2"}\n2:[]\n',
+            b'1:{"value":"$2:key"}\n2:{"key":true}\n',
+            b'1:{"value":"$D123"}\nd123:true\n',
+            b'1:{"value":"$@2"}\n2:true\n',
+            b'1:"$2"\n2:ready\n',
+            b'1:E{"message":"private-action-detail"}\n',
+        )
+        for rows in cases:
+            with self.subTest(rows=rows):
+                with self.assertRaises(fuxam.FuxamError) as raised:
+                    fuxam.parse_flight(b'0:{"a":"$@1"}\n' + rows)
+                self.assertNotIn("private-action-detail", str(raised.exception))
+
+    def test_flight_rejects_unsupported_encoded_scalars(self) -> None:
+        for scalar in (
+            "$D2026-08-27T12:00:00.000Z",
+            "$n12345678901234567890",
+            "$Infinity",
+            "$-Infinity",
+            "$NaN",
+            "$-0",
+        ):
+            body = b'0:{"a":"$@1"}\n1:' + json.dumps({"value": scalar}).encode()
+            with self.subTest(scalar=scalar), self.assertRaises(fuxam.FuxamError):
+                fuxam.parse_flight(body)
+
+    def test_flight_rejects_nonfinite_json_numbers(self) -> None:
+        for number in (b"NaN", b"Infinity", b"-Infinity", b"1e309", b"-1e309"):
+            for rows in (
+                b"1:" + number,
+                b'1:{"private-number":[' + number + b"]}",
+                b'1:"$2"\n2:' + number,
+            ):
+                with self.subTest(number=number, rows=rows):
+                    with self.assertRaises(fuxam.FuxamError) as raised:
+                        fuxam.parse_flight(b'0:{"a":"$@1"}\n' + rows)
+                    self.assertNotIn("private-number", str(raised.exception))
+
+    def test_flight_preserves_finite_numbers_and_literal_constants(self) -> None:
+        body = b'0:{"a":"$@1"}\n1:[9007199254740993,-1.5,1e308,5e-324,"NaN","Infinity"]'
+        self.assertEqual(
+            fuxam.parse_flight(body),
+            [9007199254740993, -1.5, 1e308, 5e-324, "NaN", "Infinity"],
+        )
+
+    def test_flight_rejects_invalid_headers_roots_and_text_framing(self) -> None:
+        cases = (
+            b'0:{"a":"$@not-hex"}\nnot-hex:true\n',
+            b'0:{"a":"$@A"}\nA:true\n',
+            b'0:{"a":1}\n1:true\n',
+            b'0:{"a":"$@1"}\n1:T-1,x',
+            b'0:{"a":"$@1"}\n1:T,',
+            b'0:{"a":"$@1"}\n1:T1,\xc3',
+            b'0:{"a":"$@1"}\n1:A1,\x00',
+        )
+        for body in cases:
+            with self.subTest(body=body), self.assertRaises(fuxam.FuxamError):
+                fuxam.parse_flight(body)
+
+    def test_flight_rejects_oversized_body_before_parsing(self) -> None:
+        with mock.patch.object(fuxam, "MAX_RESPONSE_BYTES", 4):
+            with self.assertRaisesRegex(fuxam.FuxamError, "large"):
+                fuxam.parse_flight(b'0:{"a":"$@1"}\n1:true\n')
+
+    def test_flight_bounds_nested_models_and_reference_depth(self) -> None:
+        nested = b'0:{"a":"$@1"}\n1:' + b"[" * 120 + b"0" + b"]" * 120
+        chain = (
+            b'0:{"a":"$@1"}\n'
+            + b"".join(
+                f'{index:x}:"${index + 1:x}"\n'.encode() for index in range(1, 120)
+            )
+            + b"78:true\n"
+        )
+        for body in (nested, chain):
+            with self.subTest(kind="nested" if body is nested else "chain"):
+                with self.assertRaises(fuxam.FuxamError):
+                    fuxam.parse_flight(body)
+
+    def test_flight_bounds_expanded_nodes_not_just_unique_records(self) -> None:
+        body = (
+            b'0:{"a":"$@1"}\n1:["$2","$2"]\n2:["$3","$3"]\n'
+            b'3:["$4","$4"]\n4:[true,false]\n'
+        )
+        with mock.patch.object(fuxam, "MAX_FLIGHT_NODES", 16, create=True):
+            with self.assertRaisesRegex(fuxam.FuxamError, "complex"):
+                fuxam.parse_flight(body)
+
+    def test_flight_bounds_repeated_text_expansion(self) -> None:
+        body = b'0:{"a":"$@1"}\n1:["$2","$2","$2","$2"]\n2:T20,' + b"x" * 32
+        with mock.patch.object(fuxam, "MAX_FLIGHT_STRING_BYTES", 96, create=True):
+            with self.assertRaisesRegex(fuxam.FuxamError, "complex"):
+                fuxam.parse_flight(body)
 
     def test_truncated_flight_record_is_rejected(self) -> None:
         with self.assertRaisesRegex(fuxam.FuxamError, "truncated"):
@@ -204,16 +469,51 @@ class ParsingTests(unittest.TestCase):
             fuxam.parse_flight(b'0:{"a":"$@1"}\n0:{}')
 
     def test_jwt_claims_decodes_urlsafe_payload(self) -> None:
-        payload = base64.urlsafe_b64encode(
-            json.dumps({"sub": "user", "exp": 2_000_000_000}).encode()
-        ).rstrip(b"=")
+        expected = {
+            "sub": "user",
+            "exp": 2_000_000_000.5,
+            "large": 1e308,
+            "small": 5e-324,
+            "literal": "Infinity",
+        }
+        payload = base64.urlsafe_b64encode(json.dumps(expected).encode()).rstrip(b"=")
         token = ".".join(("header", payload.decode(), "signature"))
-        self.assertEqual(fuxam.jwt_claims(token), {"sub": "user", "exp": 2_000_000_000})
+        self.assertEqual(fuxam.jwt_claims(token), expected)
+
+    def test_jwt_claims_rejects_nonfinite_json_numbers(self) -> None:
+        for number in (b"NaN", b"Infinity", b"-Infinity", b"1e309", b"-1e309"):
+            for field in (b'"exp":' + number, b'"data":[' + number + b"]"):
+                raw = b'{"sub":"private-user",' + field + b"}"
+                payload = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+                token = f"header.{payload}.signature"
+                with self.subTest(number=number, field=field):
+                    with self.assertRaises(fuxam.FuxamError) as raised:
+                        fuxam.jwt_claims(token)
+                    self.assertNotIn("private-user", str(raised.exception))
+                    self.assertNotIn(payload, str(raised.exception))
+
+    def test_jwt_claims_handles_deep_json_without_a_traceback(self) -> None:
+        depth = 1500
+        raw = b'{"data":' + b"[" * depth + b"0" + b"]" * depth + b"}"
+        payload = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+        try:
+            claims = fuxam.jwt_claims(f"header.{payload}.signature")
+        except fuxam.FuxamError as exc:
+            self.assertEqual(str(exc), "Clerk returned an invalid session token.")
+        else:
+            # Interpreter decoders differ in their nesting limit. Successful
+            # decoding is allowed; an interpreter limit must be a FuxamError.
+            value = claims["data"]
+            for _ in range(depth):
+                self.assertIsInstance(value, list)
+                self.assertEqual(len(value), 1)
+                value = value[0]
+            self.assertEqual(value, 0)
 
     def test_term_page_finds_one_authoritative_flight_payload(self) -> None:
-        self.assertEqual(
-            fuxam.parse_term_page(synthetic_term_html()), synthetic_term_payload()
-        )
+        expected = synthetic_term_payload()
+        expected["sample"] = {"large": 1e308, "small": 5e-324, "literal": "NaN"}
+        self.assertEqual(fuxam.parse_term_page(synthetic_term_html(expected)), expected)
 
     def test_term_page_reassembles_a_record_split_across_push_frames(self) -> None:
         record = "a:" + json.dumps(synthetic_term_payload()) + "\n"
@@ -263,6 +563,57 @@ class ParsingTests(unittest.TestCase):
             with self.subTest(body=body[:40]), self.assertRaises(fuxam.FuxamError):
                 fuxam.parse_term_page(body)
 
+    def test_term_page_rejects_unpaired_surrogate_pushes(self) -> None:
+        for codepoint in (b"d800", b"dfff"):
+            body = (
+                b'<script>self.__next_f.push([1,"private-marker\\u'
+                + codepoint
+                + b'"])</script>'
+            )
+            with self.subTest(codepoint=codepoint):
+                with self.assertRaises(fuxam.FuxamError) as raised:
+                    fuxam.parse_term_page(body)
+                self.assertNotIn("private-marker", str(raised.exception))
+
+    def test_term_page_contains_push_json_decoder_errors(self) -> None:
+        for push in (
+            b"[1," + b"9" * 5000 + b"]",
+            b"[1," + b"[" * 1500 + b"0" + b"]" * 1500 + b"]",
+        ):
+            body = b"<script>self.__next_f.push(" + push + b")</script>"
+            with self.subTest(size=len(push)):
+                with self.assertRaises(fuxam.FuxamError) as raised:
+                    fuxam.parse_term_page(body)
+                self.assertNotIn(push.decode(), str(raised.exception))
+
+    def test_term_page_handles_deep_models_without_a_traceback(self) -> None:
+        expected = synthetic_term_payload()
+        record = "a:" + "[" * 1500 + json.dumps(expected) + "]" * 1500 + "\n"
+        body = (
+            "<script>self.__next_f.push(" + json.dumps([1, record]) + ")</script>"
+        ).encode()
+        try:
+            result = fuxam.parse_term_page(body)
+        except fuxam.FuxamError as exc:
+            self.assertEqual(str(exc), "Fuxam returned malformed term page data.")
+        else:
+            self.assertEqual(result, expected)
+
+    def test_term_page_rejects_nonfinite_json_numbers(self) -> None:
+        for number in ("NaN", "Infinity", "-Infinity", "1e309", "-1e309"):
+            record = 'a:{"coursesByCategory":{},"private-number":[' + number + "]}\n"
+            model = (
+                "<script>self.__next_f.push(" + json.dumps([1, record]) + ")</script>"
+            ).encode()
+            outer = (
+                "<script>self.__next_f.push([0," + number + "])</script>"
+            ).encode() + synthetic_term_html()
+            for label, body in (("model", model), ("outer", outer)):
+                with self.subTest(number=number, label=label):
+                    with self.assertRaises(fuxam.FuxamError) as raised:
+                        fuxam.parse_term_page(body)
+                    self.assertNotIn("private-number", str(raised.exception))
+
     def test_term_page_ignores_non_integer_flight_channels(self) -> None:
         record = "a:" + json.dumps(synthetic_term_payload()) + "\n"
         for channel in (True, 1.0):
@@ -298,6 +649,74 @@ class ParsingTests(unittest.TestCase):
 
 
 class TerminalSummaryTests(unittest.TestCase):
+    def test_modules_reject_missing_collections_or_non_boolean_elections(self) -> None:
+        for value in malformed_study_plans():
+            with self.subTest(value=value):
+                with self.assertRaises(fuxam.FuxamError) as raised:
+                    fuxam.summarize_modules(value, "FS26")
+                self.assertNotIn("private-", str(raised.exception))
+
+    def test_modules_reject_conflicting_term_ids_in_either_order(self) -> None:
+        for names in (
+            ("Spring 2026", "Fall 2026"),
+            ("Fall 2026", "Spring 2026"),
+        ):
+            payload = {
+                "availableTerms": [
+                    {"id": "term-synthetic", "name": name} for name in names
+                ],
+                "electiveGroups": [
+                    {
+                        "availableStudyPlanItems": [
+                            {
+                                "isElected": True,
+                                "electedTermIds": ["term-synthetic"],
+                                "moduleVersion": {
+                                    "courseModule": {"name": "SE_01: Synthetic Module"}
+                                },
+                            }
+                        ]
+                    }
+                ],
+            }
+            for term in ("FS26", "SS26", None):
+                with (
+                    self.subTest(names=names, term=term),
+                    self.assertRaisesRegex(
+                        fuxam.FuxamError, "conflicting study-plan term"
+                    ),
+                ):
+                    fuxam.summarize_modules(payload, term)
+
+    def test_modules_accept_equivalent_names_for_the_same_term_id(self) -> None:
+        payload = synthetic_study_plan()
+        payload["availableTerms"] = [
+            {"id": "term-fs26", "name": name}
+            for name in ("Fall 2026", "FS26", "Fall Semester 2026")
+        ]
+
+        summary = fuxam.summarize_modules(payload, "FS26")
+
+        self.assertTrue(summary["complete"])
+        self.assertEqual(summary["availableTerms"], ["FS26"])
+
+    def test_modules_accept_explicit_empty_and_unelected_records(self) -> None:
+        for groups in (
+            [],
+            [{"availableStudyPlanItems": []}],
+            [{"availableStudyPlanItems": [{"isElected": False}]}],
+        ):
+            with self.subTest(groups=groups):
+                summary = fuxam.summarize_modules(
+                    {
+                        "availableTerms": [],
+                        "electiveGroups": groups,
+                    },
+                    "FS26",
+                )
+                self.assertTrue(summary["complete"])
+                self.assertEqual(summary["total"], 0)
+
     def test_term_aliases_are_canonicalized(self) -> None:
         cases = {
             "FS26": "FS26",
@@ -714,6 +1133,90 @@ class TerminalSummaryTests(unittest.TestCase):
 
 
 class CredentialAndNetworkTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal semantics.")
+    def test_auth_set_real_getpass_rejects_a_process_without_a_controlling_tty(
+        self,
+    ) -> None:
+        code = textwrap.dedent(
+            """
+            import importlib.util
+            import os
+            import sys
+            from unittest import mock
+
+            try:
+                tty = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            except OSError:
+                pass
+            else:
+                os.close(tty)
+                raise AssertionError("The child still has a controlling terminal.")
+
+            spec = importlib.util.spec_from_file_location("fuxam_no_tty", sys.argv[1])
+            cli = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cli)
+            keychain = mock.Mock()
+            cli.Keychain = mock.Mock(return_value=keychain)
+            sys.argv = [sys.argv[1], "auth", "set"]
+            status = cli.main()
+            keychain.set.assert_not_called()
+            if sys.stdin.read() != "synthetic-private-cookie\\n":
+                raise AssertionError("Credential entry consumed visible stdin.")
+            raise SystemExit(status)
+            """
+        )
+        result = subprocess.run(  # noqa: S603 - isolated Python, synthetic input only.
+            [sys.executable, "-c", code, str(SCRIPT)],
+            input="synthetic-private-cookie\n",
+            text=True,
+            capture_output=True,
+            start_new_session=True,
+            timeout=10,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("interactive", json.loads(result.stderr)["error"])
+        self.assertNotIn("synthetic-private-cookie", result.stderr)
+
+    def test_auth_set_rejects_visible_stdin_fallback_before_reading(self) -> None:
+        keychain = mock.Mock()
+        stdin = io.StringIO("synthetic-private-cookie\n")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(fuxam.sys, "argv", [str(SCRIPT), "auth", "set"]),
+            mock.patch.object(fuxam.sys, "stdin", stdin),
+            mock.patch.object(
+                fuxam.getpass, "getpass", side_effect=fuxam.getpass.fallback_getpass
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = fuxam.main()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdin.tell(), 0)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("interactive", json.loads(stderr.getvalue())["error"])
+        self.assertNotIn("synthetic-private-cookie", stderr.getvalue())
+        keychain.set.assert_not_called()
+
+    def test_auth_set_stores_only_the_hidden_normalized_value(self) -> None:
+        keychain = mock.Mock()
+        with (
+            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(
+                fuxam.getpass, "getpass", return_value="__client=synthetic-cookie"
+            ),
+        ):
+            result = fuxam.run(fuxam.build_parser().parse_args(["auth", "set"]))
+
+        keychain.set.assert_called_once_with("synthetic-cookie")
+        self.assertTrue(result["configured"])
+        self.assertNotIn("synthetic-cookie", json.dumps(result))
+
     def test_cookie_normalization_accepts_value_or_cookie_prefix(self) -> None:
         self.assertEqual(fuxam.normalize_client_cookie("abc_DEF-123"), "abc_DEF-123")
         self.assertEqual(
@@ -823,6 +1326,37 @@ class CredentialAndNetworkTests(unittest.TestCase):
         self.assertEqual(form["tab_state"], ["focused"])
         self.assertEqual(form["token"], ["synthetic-renewal-token"])
 
+    def test_session_token_rejects_invalid_expiry_before_caching(self) -> None:
+        for expiry in (
+            True,
+            False,
+            None,
+            "2000000000",
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            10**400,
+            -(10**400),
+        ):
+            client = fuxam.FuxamClient()
+            opener = mock.Mock()
+            opener.open.side_effect = synthetic_session("private-user", expiry=expiry)
+            keychain = mock.Mock()
+            keychain.get.return_value = "synthetic-client-cookie"
+            with (
+                self.subTest(expiry=expiry),
+                mock.patch.object(fuxam, "Keychain", return_value=keychain),
+                mock.patch.object(
+                    fuxam.urllib.request, "build_opener", return_value=opener
+                ),
+            ):
+                with self.assertRaises(fuxam.FuxamError) as raised:
+                    client._session_token()
+                self.assertNotIn("private-user", str(raised.exception))
+                self.assertIsNone(client.token)
+                self.assertIsNone(client.user_id)
+                self.assertEqual(client.token_expires_at, 0.0)
+
     def test_oversized_response_is_rejected(self) -> None:
         opener = FakeOpener(b"12345")
         client = fuxam.FuxamClient()
@@ -916,6 +1450,94 @@ class CredentialAndNetworkTests(unittest.TestCase):
         ):
             self.assertNotIn(private_value, serialized_error)
 
+    def test_reads_pin_user_and_organization_across_session_renewal(self) -> None:
+        identities = (
+            ("student-other", "organization-original"),
+            ("student-original", "organization-other"),
+        )
+        for mode in ("401", "expiry", "context"):
+            for next_user, next_org in identities:
+                with self.subTest(mode=mode, user=next_user, organization=next_org):
+                    client = fuxam.FuxamClient()
+                    error = urllib.error.HTTPError(
+                        "https://fuxam.app/api/synthetic",
+                        401,
+                        "Unauthorized",
+                        {},
+                        io.BytesIO(),
+                    )
+                    self.addCleanup(error.close)
+                    first_data = [{"slug": "code"}] if mode == "context" else {}
+                    second_data = [
+                        {"id": "cohort-other", "studyProgramVersionId": "program-other"}
+                    ]
+                    opener = mock.Mock()
+                    opener.open.side_effect = [
+                        *synthetic_session("student-original", "organization-original"),
+                        FakeResponse(json.dumps(first_data).encode()),
+                        *([] if mode == "expiry" else [error]),
+                        *synthetic_session(next_user, next_org),
+                        FakeResponse(json.dumps(second_data).encode()),
+                    ]
+                    keychain = mock.Mock()
+                    keychain.get.return_value = "synthetic-cookie"
+                    with (
+                        mock.patch.object(fuxam, "Keychain", return_value=keychain),
+                        mock.patch.object(
+                            fuxam.urllib.request, "build_opener", return_value=opener
+                        ),
+                    ):
+                        if mode != "context":
+                            client._json("/api/first", require_context=False)
+                            if mode == "expiry":
+                                client.token_expires_at = 0
+                        with self.assertRaisesRegex(
+                            fuxam.FuxamError, "ACCOUNT_CHANGED"
+                        ) as raised:
+                            if mode == "context":
+                                client.context()
+                            else:
+                                client._json("/api/second", require_context=False)
+
+                    requests = [call.args[0] for call in opener.open.call_args_list]
+                    fuxam_requests = [
+                        request
+                        for request in requests
+                        if urllib.parse.urlsplit(request.full_url).hostname
+                        == "fuxam.app"
+                    ]
+                    self.assertEqual(len(fuxam_requests), 1 if mode == "expiry" else 2)
+                    self.assertEqual(client.user_id, "student-original")
+                    self.assertEqual(client.organization_id, "organization-original")
+                    self.assertIsNone(client.context_cache)
+                    for private_value in (next_user, next_org, "synthetic-cookie"):
+                        self.assertNotIn(private_value, str(raised.exception))
+
+    def test_same_account_read_401_can_refresh_and_retry_once(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://fuxam.app/api/synthetic", 401, "Unauthorized", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        opener = mock.Mock()
+        opener.open.side_effect = [
+            *synthetic_session(),
+            error,
+            *synthetic_session(),
+            FakeResponse(b'{"ok":true}'),
+        ]
+        keychain = mock.Mock()
+        keychain.get.return_value = "synthetic-cookie"
+        with (
+            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(
+                fuxam.urllib.request, "build_opener", return_value=opener
+            ),
+        ):
+            result = fuxam.FuxamClient()._json("/api/synthetic", require_context=False)
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(opener.open.call_count, 6)
+
     def test_term_courses_derives_only_the_exact_my_term_sibling(self) -> None:
         client = fuxam.FuxamClient()
         dashboard = "https://fuxam.app/en/dashboard/home/user/my-courses"
@@ -1008,20 +1630,25 @@ class ServerActionContractTests(unittest.TestCase):
         ]
         action.assert_called_once_with("checkCourseConflictsAction", expected)
 
-    def test_explore_accepts_zero_page_count_as_an_empty_result(self) -> None:
-        client = fuxam.FuxamClient()
-        with (
-            mock.patch.object(client, "study_plan", return_value={}),
-            mock.patch.object(
-                client,
-                "bookable",
-                return_value={"pageCount": 0, "totalCount": 0, "courses": []},
-            ) as bookable,
-        ):
-            result = client.explore("no matches")
-
-        self.assertEqual(result["learningUnits"], [])
-        bookable.assert_called_once_with("no matches", 1, 100)
+    def test_explore_accepts_empty_catalogs_with_optional_totals(self) -> None:
+        for field in ("courses", "learningUnits"):
+            for page_count in (0, 1):
+                for totals in ({}, {"totalCount": 0}):
+                    client = fuxam.FuxamClient()
+                    value = {"pageCount": page_count, field: [], **totals}
+                    with (
+                        self.subTest(value=value),
+                        mock.patch.object(
+                            client, "study_plan", return_value=synthetic_study_plan()
+                        ),
+                        mock.patch.object(
+                            client, "bookable", return_value=value
+                        ) as bookable,
+                    ):
+                        result = client.explore("no matches")
+                        self.assertFalse(result["partial"])
+                        self.assertEqual(result["learningUnits"], [])
+                        bookable.assert_called_once_with("no matches", 1, 100)
 
     def test_catalog_page_count_is_bounded(self) -> None:
         client = fuxam.FuxamClient()
@@ -1040,11 +1667,199 @@ class ServerActionContractTests(unittest.TestCase):
                 mock.patch.object(
                     client,
                     "bookable",
-                    return_value={"pageCount": page_count},
-                ),
+                    return_value={"pageCount": page_count, "courses": []},
+                ) as bookable,
                 self.assertRaisesRegex(fuxam.FuxamError, "page count"),
             ):
                 client.explore("")
+            bookable.assert_called_once_with("", 1, 100)
+
+    def test_explore_rejects_malformed_catalog_pages(self) -> None:
+        client = fuxam.FuxamClient()
+        for value in malformed_catalog_pages():
+            with (
+                self.subTest(value=value),
+                mock.patch.object(
+                    client, "study_plan", return_value=synthetic_study_plan()
+                ),
+                mock.patch.object(client, "bookable", return_value=value),
+                self.assertRaises(fuxam.FuxamError),
+            ):
+                client.explore("")
+
+    def test_explore_validates_every_page_and_consistent_metadata(self) -> None:
+        first = {"pageCount": 2, "totalCount": 2, "courses": [{"id": "course-a"}]}
+        for second in (
+            {"pageCount": 2},
+            {"pageCount": 3, "totalCount": 2, "courses": [{"id": "course-b"}]},
+            {"pageCount": 2, "totalCount": 3, "courses": [{"id": "course-b"}]},
+        ):
+            client = fuxam.FuxamClient()
+            with (
+                self.subTest(second=second),
+                mock.patch.object(
+                    client, "study_plan", return_value=synthetic_study_plan()
+                ),
+                mock.patch.object(
+                    client, "bookable", side_effect=[first, second]
+                ) as bookable,
+                self.assertRaises(fuxam.FuxamError),
+            ):
+                client.explore("")
+            self.assertEqual(bookable.call_count, 2)
+
+    def test_explore_rejects_total_count_presence_changes_between_pages(self) -> None:
+        for totals in (({}, {"totalCount": 2}), ({"totalCount": 2}, {})):
+            client = fuxam.FuxamClient()
+            pages = [
+                {"pageCount": 2, "courses": [{"id": course_id}], **metadata}
+                for course_id, metadata in zip(
+                    ("course-a", "course-b"), totals, strict=True
+                )
+            ]
+            with (
+                self.subTest(totals=totals),
+                mock.patch.object(
+                    client, "study_plan", return_value=synthetic_study_plan()
+                ),
+                mock.patch.object(client, "bookable", side_effect=pages) as bookable,
+                self.assertRaisesRegex(fuxam.FuxamError, "pagination changed"),
+            ):
+                client.explore("")
+            self.assertEqual(bookable.call_count, 2)
+
+    def test_explore_accepts_complete_catalogs_with_optional_totals(self) -> None:
+        rows = [{"id": "course-a"}, {"id": "course-b"}]
+        for fields in (("courses",), ("learningUnits",), ("courses", "learningUnits")):
+            for totals in ({}, {"totalCount": 2}):
+                for page_rows in ([rows], [[rows[0]], [rows[1]]]):
+                    pages = [
+                        {
+                            "pageCount": len(page_rows),
+                            **totals,
+                            **dict.fromkeys(fields, courses),
+                        }
+                        for courses in page_rows
+                    ]
+                    client = fuxam.FuxamClient()
+                    with (
+                        self.subTest(fields=fields, pages=pages),
+                        mock.patch.object(
+                            client, "study_plan", return_value=synthetic_study_plan()
+                        ),
+                        mock.patch.object(
+                            client, "bookable", side_effect=pages
+                        ) as bookable,
+                    ):
+                        result = client.explore("")
+                        self.assertFalse(result["partial"])
+                        self.assertEqual(result["learningUnits"], rows)
+                        self.assertEqual(bookable.call_count, len(pages))
+
+    def test_explore_fetches_all_pages_and_deduplicates_both_supported_collections(
+        self,
+    ) -> None:
+        for field in ("courses", "learningUnits"):
+            client = fuxam.FuxamClient()
+            pages = [
+                {"pageCount": 3, field: courses}
+                for courses in (
+                    [{"id": "course-a"}],
+                    [{"id": "course-a"}, {"id": "course-b"}],
+                    [{"id": "course-c"}],
+                )
+            ]
+            with (
+                self.subTest(field=field),
+                mock.patch.object(
+                    client, "study_plan", return_value=synthetic_study_plan()
+                ),
+                mock.patch.object(client, "bookable", side_effect=pages) as bookable,
+            ):
+                result = client.explore("synthetic search")
+            self.assertFalse(result["partial"])
+            self.assertEqual(
+                [course["id"] for course in result["learningUnits"]],
+                ["course-a", "course-b", "course-c"],
+            )
+            self.assertEqual(
+                bookable.call_args_list,
+                [mock.call("synthetic search", page, 100) for page in (1, 2, 3)],
+            )
+
+    def test_explore_rejects_incomplete_catalogs_despite_stable_totals(self) -> None:
+        for field in ("courses", "learningUnits"):
+            for total, first_ids, second_ids in (
+                (3, ["course-a", "course-b"], ["course-a"]),
+                (3, ["course-a"], ["course-b"]),
+                (3, ["course-a", "course-b"], []),
+                (1, ["course-a"], ["course-b"]),
+            ):
+                pages = [
+                    {
+                        "pageCount": 2,
+                        "totalCount": total,
+                        field: [{"id": course_id} for course_id in course_ids],
+                    }
+                    for course_ids in (first_ids, second_ids)
+                ]
+                client = fuxam.FuxamClient()
+                with (
+                    self.subTest(field=field, pages=pages),
+                    mock.patch.object(
+                        client, "study_plan", return_value=synthetic_study_plan()
+                    ),
+                    mock.patch.object(client, "bookable", side_effect=pages),
+                    self.assertRaisesRegex(fuxam.FuxamError, "catalog total"),
+                ):
+                    client.explore("")
+
+    def test_explore_marks_an_unusable_study_plan_partial(self) -> None:
+        client = fuxam.FuxamClient()
+        with (
+            mock.patch.object(client, "study_plan", return_value={}),
+            mock.patch.object(
+                client, "bookable", return_value={"pageCount": 0, "courses": []}
+            ),
+        ):
+            result = client.explore("")
+        self.assertTrue(result["partial"])
+        self.assertIsNone(result["studyPlan"])
+
+    def test_aggregate_reads_do_not_hide_account_changes_as_partial_results(
+        self,
+    ) -> None:
+        client = fuxam.FuxamClient()
+        with (
+            mock.patch.object(
+                client,
+                "study_plan",
+                side_effect=fuxam.MutationPreconditionChanged("ACCOUNT_CHANGED"),
+            ),
+            mock.patch.object(client, "bookable") as bookable,
+            self.assertRaisesRegex(fuxam.FuxamError, "ACCOUNT_CHANGED"),
+        ):
+            client.explore("")
+        bookable.assert_not_called()
+        with (
+            mock.patch.object(
+                client,
+                "context",
+                return_value={
+                    "moduleCatalogUrl": "https://fuxam.app/synthetic/module-catalog"
+                },
+            ),
+            mock.patch.object(
+                client,
+                "_action",
+                side_effect=fuxam.MutationPreconditionChanged("ACCOUNT_CHANGED"),
+            ) as action,
+            mock.patch.object(client, "module_attempts") as attempts,
+            self.assertRaisesRegex(fuxam.FuxamError, "ACCOUNT_CHANGED"),
+        ):
+            client.module_details("module-synthetic", "version-synthetic", None)
+        action.assert_called_once()
+        attempts.assert_not_called()
 
     def test_cli_exposes_guarded_booking_commands(self) -> None:
         parser = fuxam.build_parser()
@@ -1321,6 +2136,20 @@ class BookingWorkflowTests(unittest.TestCase):
             )
 
         apply_client.mutate_booking.assert_not_called()
+
+    def test_non_ascii_confirmation_is_rejected_without_mutation(self) -> None:
+        client = self.booking_client(synthetic_term_payload())
+
+        with self.assertRaisesRegex(fuxam.FuxamError, "STALE_PREVIEW"):
+            fuxam.booking_workflow(
+                client,
+                "enroll",
+                "course-open",
+                apply=True,
+                confirmation="sha256:" + "é" * 64,
+            )
+
+        client.mutate_booking.assert_not_called()
 
     def test_final_precondition_rejects_state_change_before_dispatch(self) -> None:
         preview = fuxam.booking_workflow(
@@ -1610,6 +2439,156 @@ class BookingWorkflowTests(unittest.TestCase):
             )
 
         client.mutate_booking.assert_called_once()
+
+    def test_parser_failure_after_dispatch_reconciles_without_a_second_write(
+        self,
+    ) -> None:
+        nested_body = b'0:{"a":"$@1"}\n1:' + b"[" * 1500 + b"0" + b"]" * 1500 + b"\n"
+        for fault in (None, RuntimeError("private-parser-detail")):
+            for applied in (True, False):
+                with self.subTest(fault=type(fault).__name__, applied=applied):
+                    client = fuxam.FuxamClient()
+                    client.user_id = "student-synthetic"
+                    opener = FakeOpener(nested_body)
+                    final_payload = (
+                        synthetic_term_after("enroll")
+                        if applied
+                        else synthetic_term_payload()
+                    )
+                    with (
+                        mock.patch.object(
+                            client, "_session_token", return_value="token"
+                        ),
+                        mock.patch.object(
+                            client,
+                            "context",
+                            return_value={
+                                "dashboardUrl": "https://fuxam.app/synthetic/my-courses"
+                            },
+                        ),
+                        mock.patch.object(
+                            client, "current_build_id", return_value="build-synthetic"
+                        ),
+                        mock.patch.object(client, "booking_conflicts", return_value=[]),
+                        mock.patch.object(
+                            client, "_resolve_action", return_value="a" * 40
+                        ),
+                        mock.patch.object(
+                            client,
+                            "term_courses",
+                            side_effect=[
+                                synthetic_term_payload(),
+                                synthetic_term_payload(),
+                                synthetic_term_payload(),
+                                final_payload,
+                            ],
+                        ) as term_courses,
+                        mock.patch.object(
+                            fuxam.urllib.request, "build_opener", return_value=opener
+                        ),
+                        mock.patch.object(
+                            fuxam,
+                            "parse_flight",
+                            wraps=fuxam.parse_flight,
+                            side_effect=fault,
+                        ),
+                    ):
+                        preview = fuxam.booking_workflow(
+                            client,
+                            "enroll",
+                            "course-open",
+                            apply=False,
+                            confirmation=None,
+                        )
+                        if applied:
+                            result = fuxam.booking_workflow(
+                                client,
+                                "enroll",
+                                "course-open",
+                                apply=True,
+                                confirmation=preview["confirmationFingerprint"],
+                            )
+                            self.assertEqual(result["result"], "reconciled-success")
+                        else:
+                            with self.assertRaisesRegex(
+                                fuxam.FuxamError, "OUTCOME_UNKNOWN"
+                            ) as raised:
+                                fuxam.booking_workflow(
+                                    client,
+                                    "enroll",
+                                    "course-open",
+                                    apply=True,
+                                    confirmation=preview["confirmationFingerprint"],
+                                )
+                            self.assertNotIn(
+                                "private-parser-detail", str(raised.exception)
+                            )
+
+                    self.assertEqual(len(opener.requests), 1)
+                    self.assertEqual(opener.requests[0].get_method(), "POST")
+                    self.assertEqual(term_courses.call_count, 4)
+
+    def test_unexpected_post_write_verification_errors_remain_unknown(self) -> None:
+        preview = fuxam.booking_workflow(
+            self.booking_client(),
+            "enroll",
+            "course-open",
+            apply=False,
+            confirmation=None,
+        )
+        for error in (RecursionError("private-depth"), RuntimeError("private-detail")):
+            with self.subTest(error=type(error).__name__):
+                client = self.booking_client()
+                client.term_courses.side_effect = (synthetic_term_payload(), error)
+                with self.assertRaisesRegex(
+                    fuxam.FuxamError, "OUTCOME_UNKNOWN"
+                ) as raised:
+                    fuxam.booking_workflow(
+                        client,
+                        "enroll",
+                        "course-open",
+                        apply=True,
+                        confirmation=preview["confirmationFingerprint"],
+                    )
+                self.assertNotIn("private-", str(raised.exception))
+                client.mutate_booking.assert_called_once()
+                self.assertEqual(client.term_courses.call_count, 2)
+
+    def test_account_change_during_post_write_read_requires_ui_inspection(self) -> None:
+        preview = fuxam.booking_workflow(
+            self.booking_client(),
+            "enroll",
+            "course-open",
+            apply=False,
+            confirmation=None,
+        )
+        for ambiguous in (False, True):
+            client = self.booking_client()
+            client.term_courses.side_effect = (
+                synthetic_term_payload(),
+                fuxam.MutationPreconditionChanged("ACCOUNT_CHANGED: private-account"),
+            )
+            if ambiguous:
+                client.mutate_booking.side_effect = fuxam.MutationOutcomeUnknown()
+            with self.subTest(ambiguous=ambiguous):
+                with self.assertRaisesRegex(
+                    fuxam.FuxamError, "OUTCOME_UNKNOWN"
+                ) as raised:
+                    fuxam.booking_workflow(
+                        client,
+                        "enroll",
+                        "course-open",
+                        apply=True,
+                        confirmation=preview["confirmationFingerprint"],
+                    )
+                self.assertIn(
+                    "inspect the official UI before trying again.",
+                    str(raised.exception),
+                )
+                self.assertNotIn("ACCOUNT_CHANGED", str(raised.exception))
+                self.assertNotIn("private-account", str(raised.exception))
+                client.mutate_booking.assert_called_once()
+                self.assertEqual(client.term_courses.call_count, 2)
 
     def test_post_write_verification_failure_is_unknown_without_private_detail(
         self,
@@ -1925,6 +2904,41 @@ class BookingWorkflowTests(unittest.TestCase):
 
         opener.open.assert_not_called()
 
+    def test_pre_dispatch_account_change_is_not_reported_as_unknown(self) -> None:
+        client = fuxam.FuxamClient()
+        client.user_id = "student-synthetic"
+        opener = FakeOpener()
+        changed = fuxam.MutationPreconditionChanged("ACCOUNT_CHANGED")
+        with (
+            mock.patch.object(
+                client,
+                "context",
+                return_value={"dashboardUrl": "https://fuxam.app/synthetic/my-courses"},
+            ),
+            mock.patch.object(client, "_resolve_action", return_value="a" * 40),
+            mock.patch.object(
+                client, "current_build_id", return_value="build-synthetic"
+            ),
+            mock.patch.object(
+                client, "_session_token", side_effect=["synthetic-token", changed]
+            ),
+            mock.patch.object(
+                fuxam.urllib.request, "build_opener", return_value=opener
+            ),
+            self.assertRaisesRegex(
+                fuxam.MutationPreconditionChanged, "ACCOUNT_CHANGED"
+            ) as raised,
+        ):
+            client.mutate_booking(
+                "unenroll",
+                "course-synthetic",
+                expected_account=fuxam.account_fingerprint("student-synthetic"),
+                expected_build="build-synthetic",
+            )
+
+        self.assertIs(raised.exception, changed)
+        self.assertEqual(opener.requests, [])
+
     def test_build_change_after_preview_blocks_before_post(self) -> None:
         client = fuxam.FuxamClient()
         client.user_id = "student-synthetic"
@@ -1997,6 +3011,56 @@ class BookingWorkflowTests(unittest.TestCase):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_deep_smoke_accepts_large_catalog_with_a_single_row_probe(self) -> None:
+        client = FakeSmokeClient()
+        with mock.patch.object(client, "bookable", wraps=client.bookable) as bookable:
+            result = fuxam.smoke_test(client, deep=True)
+
+        self.assertTrue(result["ok"])
+        bookable.assert_called_once_with("", 1, 1)
+
+    def test_deep_smoke_rejects_incomplete_single_page_catalogs(self) -> None:
+        client = FakeSmokeClient()
+        for field in ("courses", "learningUnits"):
+            for rows in (
+                [],
+                [{"id": "private-catalog-course"}],
+                [{"id": "private-catalog-course"}] * 2,
+            ):
+                with (
+                    self.subTest(field=field, rows=rows),
+                    mock.patch.object(
+                        client,
+                        "bookable",
+                        return_value={"pageCount": 1, "totalCount": 2, field: rows},
+                    ),
+                ):
+                    result = fuxam.smoke_test(client, deep=True)
+                    self.assertFalse(result["ok"])
+                    check = result["checks"][-1]
+                    self.assertEqual(check["name"], "bookable-server-action")
+                    self.assertEqual(check["error"], "FUXAM_CHECK_FAILED")
+                    self.assertNotIn("private-catalog-course", json.dumps(result))
+
+    def test_smoke_uses_the_same_study_plan_and_catalog_validation_as_commands(
+        self,
+    ) -> None:
+        client = FakeSmokeClient()
+        for method, cases, name in (
+            ("study_plan", malformed_study_plans(), "study-plan"),
+            ("bookable", malformed_catalog_pages(), "bookable-server-action"),
+        ):
+            for value in cases:
+                with self.subTest(method=method, value=value):
+                    with mock.patch.object(client, method, return_value=value):
+                        result = fuxam.smoke_test(client, deep=True)
+                    self.assertFalse(result["ok"])
+                    check = next(
+                        item for item in result["checks"] if item["name"] == name
+                    )
+                    self.assertEqual(check["error"], "FUXAM_CHECK_FAILED")
+                    self.assertNotIn("private-", json.dumps(result))
+
     def test_doctor_reports_credential_status_without_revealing_value(self) -> None:
         keychain = mock.Mock()
         keychain.get.return_value = "super-private-cookie"
@@ -2076,6 +3140,28 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("student_PRIVATE", json.dumps(result))
         self.assertTrue(result["checks"][-1]["ok"])
 
+    def test_smoke_test_stops_remaining_checks_when_the_account_changes(self) -> None:
+        for deep in (False, True):
+            client = FakeSmokeClient()
+            with (
+                self.subTest(deep=deep),
+                mock.patch.object(
+                    client,
+                    "study_plan",
+                    side_effect=fuxam.MutationPreconditionChanged("ACCOUNT_CHANGED"),
+                ),
+                mock.patch.object(client, "agenda") as agenda,
+                mock.patch.object(client, "term_courses") as term_courses,
+                mock.patch.object(client, "bookable") as bookable,
+                self.assertRaisesRegex(
+                    fuxam.MutationPreconditionChanged, "ACCOUNT_CHANGED"
+                ),
+            ):
+                fuxam.smoke_test(client, deep=deep)
+            agenda.assert_not_called()
+            term_courses.assert_not_called()
+            bookable.assert_not_called()
+
     def test_smoke_test_redacts_unexpected_exception_details(self) -> None:
         client = FakeSmokeClient()
         with mock.patch.object(
@@ -2150,12 +3236,14 @@ class SkillMetadataTests(unittest.TestCase):
             "html",
             "http",
             "json",
+            "math",
             "re",
             "sys",
             "time",
             "typing",
             "unicodedata",
             "urllib",
+            "warnings",
         }
         self.assertEqual(imports - allowed, set())
 

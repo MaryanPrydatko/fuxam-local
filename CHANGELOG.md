@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — 2026-08-27
+
+- Refuse credential entry when a terminal cannot hide input, and stop commands if the signed-in user or organization changes.
+- Reconcile unexpected booking-response and verification failures without retrying a mutation.
+- Decode nested React Flight model references and literal text correctly, with bounded depth and expansion.
+- Reject malformed study-plan and catalog data instead of reporting false empty or complete results; use those same validators in smoke tests.
+- Support shared, symlinked skill directories while preserving backups and rollback.
+- Add a working private vulnerability-reporting channel.
+
 ## 0.4.0 — 2026-08-25
 
 - Added authoritative active-term learning-unit enrollment, waitlist, self-study, and availability data from Fuxam's My Learning Units page.

@@ -90,6 +90,8 @@ The cookie is stored in macOS Keychain. If it expires, repeat these steps. Remov
 python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" auth clear
 ```
 
+Run credential setup in an interactive terminal. The CLI refuses input if it cannot keep the prompt hidden.
+
 ### 3. Verify
 
 ```sh
@@ -218,6 +220,7 @@ Before dispatch, the CLI rechecks the Clerk user and organization, term, fronten
 | --- | --- | --- |
 | `SCHEDULE_CONFLICTS` | Fuxam found a schedule conflict | Review and confirm it in the official UI |
 | `STALE_PREVIEW` | The supplied fingerprint does not match the fresh preview | Run a new preview and review it again |
+| `ACCOUNT_CHANGED` | The signed-in user or organization changed during a command | Confirm the intended account, then start a new command |
 | `NOT_ELIGIBLE` | Fuxam does not currently allow that transition | Check `learning-units` or use the UI |
 | `OUTCOME_UNKNOWN` | The request outcome cannot be proven | Inspect the UI; do not retry blindly |
 | `POSTCONDITION_FAILED` | Fuxam did not show the expected final state | Inspect the UI; do not retry blindly |
@@ -256,6 +259,7 @@ MCP is useful when a shared or long-running server is actually needed. It does n
 | --- | --- |
 | **Clerk cookie** | Stored only in macOS Keychain and sent only to Clerk |
 | **Fuxam session token** | Kept in process memory and sent only to `fuxam.app` |
+| **Account consistency** | Each command stays bound to its first authenticated user and organization |
 | **Network** | HTTPS only, with restricted hosts, ports, redirects, and response sizes |
 | **Actions** | Separate fixed read and mutation allowlists; no generic server-action runner |
 | **Account changes** | One exact ID, fresh preview, explicit fingerprint approval, one request, read-back verification |
