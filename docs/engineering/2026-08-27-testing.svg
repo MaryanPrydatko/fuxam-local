@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title description">
+  <title id="title">Fuxam Local: tested beyond the happy path</title>
+  <desc id="description">Offline validation of a local, unreleased build. All 153 tests passed on Python 3.10.14, 3.13.9 and 3.14.5. Recorded stress runs total 452,574 synthetic executions: 444,426 parser checks and 8,148 booking scenarios. Two seeds and three runtimes, with repeated cases included. Booking safeguards cover preview, approval, rechecking, sending at most once and readback. No real bookings were tested; passing tests are not a guarantee against bugs.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#62716A"/>
+    </marker>
+    <style>
+      text { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; fill: #1B2923; }
+      .mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; }
+      .muted { fill: #52625A; }
+      .label { font-size: 17px; font-weight: 600; letter-spacing: 2px; }
+      .rule { stroke: #CDD3CA; stroke-width: 1.5; }
+      .green { fill: #205D43; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1200" fill="#F5F3EC"/>
+  <rect width="12" height="1200" fill="#205D43"/>
+
+  <text x="80" y="76" class="label green">FUXAM LOCAL / ENGINEERING UPDATE</text>
+  <text x="1520" y="76" text-anchor="end" class="mono muted" font-size="18">DRAFT · 27 AUG 2026</text>
+  <text x="76" y="166" font-size="66" font-weight="650" letter-spacing="-2">Tested beyond the happy path.</text>
+  <text x="80" y="215" font-size="26" class="muted">Local validation of the CLI, booking guards and agent skill.</text>
+  <line x1="80" y1="259" x2="1520" y2="259" class="rule"/>
+
+  <text x="80" y="312" class="label muted">REGRESSION SUITE · FRESH RECHECK</text>
+  <text x="74" y="425" font-size="132" font-weight="650" letter-spacing="-6" class="green">153</text>
+  <text x="80" y="466" font-size="27" font-weight="500">tests passed on every runtime</text>
+  <text x="80" y="512" font-size="21" class="mono">3.10.14 / 3.13.9 / 3.14.5</text>
+  <text x="80" y="548" font-size="21" class="muted">459 unit-test executions in the matrix</text>
+
+  <line x1="620" y1="298" x2="620" y2="554" class="rule"/>
+
+  <text x="680" y="312" class="label muted">STRESS RUNS · SOURCE HASH VERIFIED</text>
+  <text x="674" y="424" font-size="120" font-weight="650" letter-spacing="-5" class="green">452,574</text>
+  <text x="680" y="466" font-size="27" font-weight="500">synthetic stress executions</text>
+  <text x="680" y="512" font-size="23">444,426 parser + 8,148 booking</text>
+  <text x="680" y="548" font-size="21" class="muted">2 seeds × 3 runtimes · repeated runs included</text>
+
+  <line x1="80" y1="587" x2="1520" y2="587" class="rule"/>
+  <text x="80" y="635" class="label muted">BOOKING BEHAVIOR CHECKED WITH SYNTHETIC FAULTS</text>
+
+  <g>
+    <rect x="80" y="661" width="264" height="112" rx="8" fill="#E5EBE1"/>
+    <text x="102" y="697" font-size="16" class="mono muted">01</text>
+    <text x="102" y="735" font-size="28" font-weight="600">Preview</text>
+    <text x="318" y="699" text-anchor="end" font-size="17" class="muted">exact booking</text>
+
+    <rect x="374" y="661" width="264" height="112" rx="8" fill="#E5EBE1"/>
+    <text x="396" y="697" font-size="16" class="mono muted">02</text>
+    <text x="396" y="735" font-size="28" font-weight="600">Approve</text>
+    <text x="612" y="699" text-anchor="end" font-size="17" class="muted">fingerprint</text>
+
+    <rect x="668" y="661" width="264" height="112" rx="8" fill="#E5EBE1"/>
+    <text x="690" y="697" font-size="16" class="mono muted">03</text>
+    <text x="690" y="735" font-size="28" font-weight="600">Recheck</text>
+    <text x="906" y="699" text-anchor="end" font-size="17" class="muted">state + account</text>
+
+    <rect x="962" y="661" width="264" height="112" rx="8" fill="#205D43"/>
+    <text x="984" y="697" font-size="16" class="mono" style="fill:#D5E5D9">04</text>
+    <text x="984" y="735" font-size="24" font-weight="600" style="fill:#FFFFFF">Send at most once</text>
+    <text x="1200" y="699" text-anchor="end" font-size="17" style="fill:#D5E5D9">no auto-retry</text>
+
+    <rect x="1256" y="661" width="264" height="112" rx="8" fill="#E5EBE1"/>
+    <text x="1278" y="697" font-size="16" class="mono muted">05</text>
+    <text x="1278" y="735" font-size="28" font-weight="600">Verify</text>
+    <text x="1494" y="699" text-anchor="end" font-size="17" class="muted">read back state</text>
+
+    <g stroke="#62716A" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M 349 717 H 368"/>
+      <path d="M 643 717 H 662"/>
+      <path d="M 937 717 H 956"/>
+      <path d="M 1231 717 H 1250"/>
+    </g>
+  </g>
+
+  <text x="80" y="819" font-size="24">Unclear outcome? Stop and check Fuxam. Never replay the change automatically.</text>
+  <line x1="80" y1="859" x2="1520" y2="859" class="rule"/>
+
+  <text x="80" y="905" class="label muted">REGRESSIONS NOW COVER</text>
+  <text x="80" y="950" font-size="25" font-weight="600">Malformed server data</text>
+  <text x="80" y="985" font-size="22" class="muted">Controlled errors, not crashes.</text>
+  <text x="575" y="950" font-size="25" font-weight="600">Non-ASCII approval</text>
+  <text x="575" y="985" font-size="22" class="muted">Rejected before any write.</text>
+  <text x="1070" y="950" font-size="25" font-weight="600">Conflicting term IDs</text>
+  <text x="1070" y="985" font-size="22" class="muted">Ambiguity rejected.</text>
+
+  <line x1="80" y1="1027" x2="1520" y2="1027" class="rule"/>
+  <text x="80" y="1073" font-size="25" font-weight="600">Offline fixtures. No real bookings tested.</text>
+  <text x="80" y="1112" font-size="22" class="muted">Passing tests reduce risk; live API changes and agent behavior still need checks.</text>
+  <text x="80" y="1160" font-size="17" class="mono muted">LOCAL SOURCE 527cd9e03cbd · UNRELEASED</text>
+  <text x="1520" y="1160" text-anchor="end" font-size="18" class="muted">Methodology and limits in the accompanying notes.</text>
+</svg>
