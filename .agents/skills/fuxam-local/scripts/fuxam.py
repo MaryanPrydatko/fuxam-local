@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import getpass
 import hashlib
 import hmac
 import http.client
+import io
 import json
 import math
 import re
@@ -22,6 +22,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
+from fuxam_credentials import credential_store
 from fuxam_errors import FuxamError
 from fuxam_protocol import (
     MAX_RESPONSE_BYTES,
@@ -36,9 +37,6 @@ CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
 VERSION = "0.4.2"
 USER_AGENT = f"fuxam-local/{VERSION}"
-KEYCHAIN_SERVICE = b"codex-fuxam-local"
-KEYCHAIN_ACCOUNT = b"__client"
-NOT_FOUND = -25300
 MAX_COOKIE_BYTES = 16 * 1024
 MAX_EXPLORE_PAGES = 100
 MAX_SCRIPT_SOURCES = 128
@@ -87,21 +85,24 @@ class MutationPreconditionChanged(FuxamError):
 def doctor_status() -> dict[str, Any]:
     """Report local readiness without contacting Fuxam or exposing credentials."""
     python_supported = sys.version_info >= (3, 10)
-    platform_supported = sys.platform == "darwin"
+    platform_supported = sys.platform in {"darwin", "linux", "win32"}
     configured: bool | None = None
-    keychain_failed = False
+    storage: str | None = None
+    storage_failed = False
     if platform_supported:
         try:
-            configured = Keychain().get() is not None
+            store = credential_store()
+            storage = store.storage
+            configured = store.get() is not None
         except (FuxamError, OSError, UnicodeError):
-            keychain_failed = True
+            storage_failed = True
 
     result: dict[str, Any] = {
         "ok": (
             python_supported
             and platform_supported
             and configured is True
-            and not keychain_failed
+            and not storage_failed
         ),
         "version": VERSION,
         "python": {
@@ -110,7 +111,7 @@ def doctor_status() -> dict[str, Any]:
         },
         "platform": {"name": sys.platform, "supported": platform_supported},
         "credential": {
-            "storage": "macOS Keychain",
+            "storage": storage,
             "configured": configured,
         },
         "network": {
@@ -120,8 +121,23 @@ def doctor_status() -> dict[str, Any]:
         "access": "read with guarded booking writes",
         "telemetry": False,
     }
-    if keychain_failed:
-        result["keychainError"] = "KEYCHAIN_CHECK_FAILED"
+    if storage_failed:
+        result["credentialError"] = (
+            "CREDENTIAL_STORE_UNAVAILABLE"
+            if storage is None
+            else "CREDENTIAL_UNREADABLE"
+        )
+        if sys.platform == "darwin":
+            # Keep the original macOS diagnostic key for existing callers.
+            result["keychainError"] = "KEYCHAIN_CHECK_FAILED"
+        hint = "Unlock your OS credential store and run auth set in a local terminal."
+        if sys.platform == "linux":
+            hint = (
+                "Install secret-tool and unlock your desktop keyring, then run auth set."
+                if storage is None
+                else "Unlock your desktop keyring or run auth set locally."
+            )
+        result["credential"]["hint"] = hint
     return result
 
 
@@ -262,124 +278,6 @@ def normalize_client_cookie(value: str) -> str:
     ):
         raise FuxamError("The credential was empty or malformed.")
     return normalized
-
-
-class Keychain:
-    def __init__(self) -> None:
-        if sys.platform != "darwin":
-            raise FuxamError("This skill currently requires macOS Keychain.")
-        self.lib = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
-        self.core = ctypes.CDLL(
-            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-        )
-        self.lib.SecKeychainFindGenericPassword.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-            ctypes.c_char_p,
-            ctypes.c_uint32,
-            ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        self.lib.SecKeychainFindGenericPassword.restype = ctypes.c_int32
-        self.lib.SecKeychainItemFreeContent.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        self.lib.SecKeychainItemFreeContent.restype = ctypes.c_int32
-        self.lib.SecKeychainAddGenericPassword.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-            ctypes.c_char_p,
-            ctypes.c_uint32,
-            ctypes.c_char_p,
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        self.lib.SecKeychainAddGenericPassword.restype = ctypes.c_int32
-        self.lib.SecKeychainItemModifyAttributesAndData.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-        ]
-        self.lib.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
-        self.lib.SecKeychainItemDelete.argtypes = [ctypes.c_void_p]
-        self.lib.SecKeychainItemDelete.restype = ctypes.c_int32
-        self.core.CFRelease.argtypes = [ctypes.c_void_p]
-        self.core.CFRelease.restype = None
-
-    def _find(self) -> tuple[int, bytes | None, ctypes.c_void_p]:
-        length = ctypes.c_uint32()
-        data = ctypes.c_void_p()
-        item = ctypes.c_void_p()
-        status = self.lib.SecKeychainFindGenericPassword(
-            None,
-            len(KEYCHAIN_SERVICE),
-            KEYCHAIN_SERVICE,
-            len(KEYCHAIN_ACCOUNT),
-            KEYCHAIN_ACCOUNT,
-            ctypes.byref(length),
-            ctypes.byref(data),
-            ctypes.byref(item),
-        )
-        if status == NOT_FOUND:
-            return status, None, item
-        if status != 0:
-            raise FuxamError(f"Keychain lookup failed with status {status}.")
-        try:
-            value = ctypes.string_at(data, length.value)
-        finally:
-            self.lib.SecKeychainItemFreeContent(None, data)
-        return status, value, item
-
-    def get(self) -> str | None:
-        _, value, item = self._find()
-        try:
-            return value.decode("utf-8") if value is not None else None
-        finally:
-            if item.value:
-                self.core.CFRelease(item)
-
-    def set(self, value: str) -> None:
-        encoded = value.encode("utf-8")
-        status, _, item = self._find()
-        try:
-            if status == NOT_FOUND:
-                result = self.lib.SecKeychainAddGenericPassword(
-                    None,
-                    len(KEYCHAIN_SERVICE),
-                    KEYCHAIN_SERVICE,
-                    len(KEYCHAIN_ACCOUNT),
-                    KEYCHAIN_ACCOUNT,
-                    len(encoded),
-                    encoded,
-                    None,
-                )
-            else:
-                result = self.lib.SecKeychainItemModifyAttributesAndData(
-                    item, None, len(encoded), encoded
-                )
-            if result != 0:
-                raise FuxamError(f"Keychain update failed with status {result}.")
-        finally:
-            if item.value:
-                self.core.CFRelease(item)
-
-    def clear(self) -> bool:
-        status, _, item = self._find()
-        if status == NOT_FOUND:
-            return False
-        try:
-            result = self.lib.SecKeychainItemDelete(item)
-            if result != 0:
-                raise FuxamError(f"Keychain deletion failed with status {result}.")
-            return True
-        finally:
-            if item.value:
-                self.core.CFRelease(item)
 
 
 def canonical_term(value: str) -> str:
@@ -1233,7 +1131,7 @@ class FuxamClient:
     def _session_token(self, force: bool = False) -> str:
         if not force and self.token and time.time() < self.token_expires_at - 10:
             return self.token
-        cookie = Keychain().get()
+        cookie = credential_store().get()
         if not cookie:
             raise FuxamError(
                 "Authentication is not configured. Run `fuxam.py auth set` locally."
@@ -2197,7 +2095,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also check the active-term page and bookable catalog action",
     )
-    auth = commands.add_parser("auth", help="Manage the local Keychain credential")
+    auth = commands.add_parser("auth", help="Manage the local OS-stored credential")
     auth.add_argument("operation", choices=("set", "status", "clear"))
     commands.add_parser("context", help="Verify the CODE study context")
     enrolled = commands.add_parser(
@@ -2313,14 +2211,24 @@ def run(args: argparse.Namespace) -> Any:
         return doctor_status()
 
     if args.command == "auth":
-        keychain = Keychain()
+        store = credential_store()
         if args.operation == "status":
+            try:
+                configured = store.get() is not None
+            except FuxamError:
+                if sys.platform != "linux":
+                    raise
+                return {
+                    "configured": None,
+                    "storage": store.storage,
+                    "note": "No readable credential. Unlock the keyring or run auth set locally.",
+                }
             return {
-                "configured": keychain.get() is not None,
-                "storage": "macOS Keychain",
+                "configured": configured,
+                "storage": store.storage,
             }
         if args.operation == "clear":
-            return {"removed": keychain.clear()}
+            return {"removed": store.clear()}
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", getpass.GetPassWarning)
@@ -2332,8 +2240,8 @@ def run(args: argparse.Namespace) -> Any:
                 "Credential entry requires an interactive terminal with hidden "
                 "input. Run `fuxam.py auth set` directly in your terminal."
             ) from exc
-        keychain.set(value)
-        return {"configured": True, "storage": "macOS Keychain"}
+        store.set(value)
+        return {"configured": True, "storage": store.storage}
 
     client = FuxamClient()
     if args.command == "smoke-test":
@@ -2409,6 +2317,10 @@ def run(args: argparse.Namespace) -> Any:
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if isinstance(stream, io.TextIOWrapper):
+                stream.reconfigure(encoding="utf-8")
     try:
         args = build_parser().parse_args()
         result = run(args)

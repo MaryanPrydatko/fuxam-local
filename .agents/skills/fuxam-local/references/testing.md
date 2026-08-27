@@ -8,7 +8,9 @@ python3 "<skill-root>/scripts/fuxam.py" smoke-test
 python3 "<skill-root>/scripts/fuxam.py" smoke-test --deep
 ```
 
-`doctor` checks the runtime and Keychain without contacting Fuxam. If authentication is missing, follow [authentication.md](authentication.md); the user runs the hidden prompt locally.
+On Windows, use `py -3` instead of `python3`.
+
+`doctor` checks the runtime and OS credential store without contacting Fuxam. If authentication is unavailable, follow [authentication.md](authentication.md); the user unlocks the store or runs the hidden prompt locally.
 
 Smoke checks are read-only and return pass/fail status and response types, not academic records. The deep check adds active-term parsing and one frontend-backed catalog page. Study-plan and catalog checks share their commands' schema validators.
 

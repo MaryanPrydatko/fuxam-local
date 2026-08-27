@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.10", "3.13"]
 
     steps:
@@ -23,6 +23,30 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m compileall -q .agents/skills/fuxam-local/scripts
       - run: python -m unittest discover -s tests -v
+
+  credential-store:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-tools gnome-keyring dbus-x11
+      - if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -e -o pipefail -c '
+            printf "%s" "synthetic-test-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+            python tests/native_credentials.py
+          '
+      - if: runner.os == 'Windows'
+        run: python tests/native_credentials.py
 
   lint:
     runs-on: ubuntu-latest

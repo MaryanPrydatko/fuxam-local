@@ -3,10 +3,22 @@
 A CLI and agent skill for CODE University's Fuxam. Read courses, study progress
 and schedules; enroll, unenroll, or manage waitlists for the active term.
 
-Requires macOS and Python 3.10+. Uses the standard library and macOS Keychain.
+Requires Python 3.10+. Uses the standard library and your OS credential store.
 No MCP server or telemetry. Unofficial; Fuxam's private API can change.
 
+| System | Credential storage | Setup |
+| --- | --- | --- |
+| macOS | Keychain | Built in |
+| Linux | Secret Service | `secret-tool` and an unlocked desktop keyring |
+| Windows | Credential Manager | Built in; no administrator access needed |
+
+Linux: on Ubuntu/Debian, install `libsecret-tools`; a Secret Service provider
+such as GNOME Keyring must also be running. WSL needs the same Linux setup.
+There is no `.env` or plaintext fallback for machines without a keyring.
+
 ## Install
+
+On Windows, use `py -3` wherever the examples show `python3`.
 
 ```sh
 git clone https://github.com/MaryanPrydatko/fuxam-local.git
@@ -14,7 +26,8 @@ cd fuxam-local
 python3 install.py
 ```
 
-Installs to `~/.agents/skills/fuxam-local`, with Codex and Claude aliases.
+Installs to `~/.agents/skills/fuxam-local`, with Codex and Claude aliases
+(copies on Windows, symlinks elsewhere).
 To update from the checkout:
 
 ```sh
@@ -33,11 +46,22 @@ shell arguments, environment variables, or files.
 
 ```sh
 FUXAM="$HOME/.agents/skills/fuxam-local/scripts/fuxam.py"
+```
+
+In Windows PowerShell, set the path with:
+
+```powershell
+$FUXAM = "$env:USERPROFILE/.agents/skills/fuxam-local/scripts/fuxam.py"
+```
+
+Then sign in and check the connection:
+
+```sh
 python3 "$FUXAM" auth set
 python3 "$FUXAM" smoke-test
 ```
 
-Paste only into the hidden terminal prompt. The cookie stays in Keychain.
+Paste only into the hidden terminal prompt. The cookie stays in your OS store.
 See [authentication](.agents/skills/fuxam-local/references/authentication.md)
 for browser steps, renewal, and removal.
 

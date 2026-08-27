@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add Linux Secret Service and Windows Credential Manager storage.
+- Install Windows agent copies without symlink privileges.
+- Write UTF-8 output on Windows and add cross-platform checks.
+
 ## 0.4.2 — 2026-08-27
 
 - Separate response decoding from the CLI.
