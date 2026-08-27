@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-08-27
 
 - Add explicit temporary login through `--auth env` and `FUXAM_COOKIE`.
 - Explain missing Linux keyring dependencies during installation.
