@@ -36,7 +36,7 @@ from fuxam_protocol import (
 BASE_URL = "https://fuxam.app"
 CLERK_URL = "https://clerk.fuxam.app"
 CLERK_QUERY = "__clerk_api_version=2026-05-12&_clerk_js_version=6.29.2"
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 USER_AGENT = f"fuxam-local/{VERSION}"
 MAX_COOKIE_BYTES = 16 * 1024
 MAX_EXPLORE_PAGES = 100
