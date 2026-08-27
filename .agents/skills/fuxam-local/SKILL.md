@@ -6,11 +6,13 @@ license: MIT
 
 # Fuxam Local
 
-Requires macOS and Python 3.10+. Resolve `<skill-root>` from this file's directory, not a harness-specific installation path.
+Requires Python 3.10+ on macOS, Linux, or Windows. Linux also needs `secret-tool` and an unlocked Secret Service keyring. Resolve `<skill-root>` from this file's directory, not a harness-specific installation path.
 
 ```sh
 python3 "<skill-root>/scripts/fuxam.py" <command>
 ```
+
+On native Windows, use `py -3` instead of `python3`. WSL follows the Linux requirements.
 
 The CLI connects only to `fuxam.app` and `clerk.fuxam.app` over HTTPS. Use JSON for agent work, `--format table` for terminal summaries, and `--help` for arguments.
 
@@ -33,7 +35,7 @@ Report incomplete results and schema errors as unverified, not empty.
 
 ## Authentication and privacy
 
-For setup or authentication failures, read [authentication.md](references/authentication.md). If authentication is missing or expired, stop the data request. The user runs the hidden Keychain prompt locally; never request, print, log, or summarize credentials in chat.
+For setup or authentication failures, read [authentication.md](references/authentication.md). If authentication is unavailable or expired, stop the data request. The user runs the hidden prompt locally; never request, print, log, or summarize credentials in chat.
 
 On `ACCOUNT_CHANGED`, stop and confirm the intended account before starting a new command. Do not mix results across accounts.
 

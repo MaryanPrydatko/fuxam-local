@@ -1,6 +1,10 @@
 # Local authentication
 
-The CLI stores the Fuxam Clerk `__client` cookie in the user's macOS login Keychain under service `codex-fuxam-local`. It never stores the cookie in the skill, shell environment, command history, or a hosted service.
+The CLI stores the Fuxam Clerk `__client` cookie in macOS Keychain, Linux Secret Service, or Windows Credential Manager. It never stores the cookie in the skill, a `.env` file, shell environment, command history, or a hosted service.
+
+Linux requires `secret-tool` (Ubuntu/Debian: `libsecret-tools`) and an unlocked Secret Service keyring, such as GNOME Keyring. Run in the same desktop session as the keyring. WSL, SSH, and headless sessions need a reachable Secret Service; they do not use the Windows store or fall back to files.
+
+On native Windows, use `py -3` instead of `python3` in these commands.
 
 The user must complete setup themselves in a local terminal:
 
@@ -30,5 +34,9 @@ If the session expires, repeat `auth set` with a fresh cookie. To remove it:
 ```sh
 python3 "<skill-root>/scripts/fuxam.py" auth clear
 ```
+
+On Linux, an inaccessible credential may be missing or locked. `auth status` reports `configured: null` when it cannot tell; this is not a confirmed login. Unlock the keyring before replacing the cookie. A failed `auth clear` does not confirm removal; inspect the Fuxam Local entry in the keyring.
+
+Storage limits are 2,560 bytes on Windows and 8,191 bytes on Linux. Oversized cookies are rejected, not truncated. macOS keeps the existing 16 KiB limit and stored credentials.
 
 `<skill-root>` means the directory containing the skill's `SKILL.md` file.

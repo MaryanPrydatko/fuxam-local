@@ -24,6 +24,8 @@ SCRIPT = ROOT / ".agents" / "skills" / "fuxam-local" / "scripts" / "fuxam.py"
 
 
 def load_script_module(name: str, path: pathlib.Path) -> ModuleType:
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load bundled module {name}.")
@@ -35,6 +37,7 @@ def load_script_module(name: str, path: pathlib.Path) -> ModuleType:
 
 SCRIPTS = SCRIPT.parent
 load_script_module("fuxam_errors", SCRIPTS / "fuxam_errors.py")
+credentials = load_script_module("fuxam_credentials", SCRIPTS / "fuxam_credentials.py")
 protocol = load_script_module("fuxam_protocol", SCRIPTS / "fuxam_protocol.py")
 fuxam = load_script_module("fuxam_local_cli", SCRIPT)
 
@@ -1185,8 +1188,8 @@ class CredentialAndNetworkTests(unittest.TestCase):
 
             sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
             import fuxam as cli
-            keychain = mock.Mock()
-            cli.Keychain = mock.Mock(return_value=keychain)
+            keychain = mock.Mock(storage="macOS Keychain")
+            cli.credential_store = mock.Mock(return_value=keychain)
             sys.argv = [sys.argv[1], "auth", "set"]
             status = cli.main()
             keychain.set.assert_not_called()
@@ -1211,11 +1214,11 @@ class CredentialAndNetworkTests(unittest.TestCase):
         self.assertNotIn("synthetic-private-cookie", result.stderr)
 
     def test_auth_set_rejects_visible_stdin_fallback_before_reading(self) -> None:
-        keychain = mock.Mock()
+        keychain = mock.Mock(storage="macOS Keychain")
         stdin = io.StringIO("synthetic-private-cookie\n")
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
-            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(fuxam, "credential_store", return_value=keychain),
             mock.patch.object(fuxam.sys, "argv", [str(SCRIPT), "auth", "set"]),
             mock.patch.object(fuxam.sys, "stdin", stdin),
             mock.patch.object(
@@ -1234,9 +1237,9 @@ class CredentialAndNetworkTests(unittest.TestCase):
         keychain.set.assert_not_called()
 
     def test_auth_set_stores_only_the_hidden_normalized_value(self) -> None:
-        keychain = mock.Mock()
+        keychain = mock.Mock(storage="macOS Keychain")
         with (
-            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(fuxam, "credential_store", return_value=keychain),
             mock.patch.object(
                 fuxam.getpass, "getpass", return_value="__client=synthetic-cookie"
             ),
@@ -1337,11 +1340,11 @@ class CredentialAndNetworkTests(unittest.TestCase):
             FakeResponse(json.dumps(clerk_client).encode()),
             FakeResponse(json.dumps({"jwt": session_token}).encode()),
         )
-        keychain = mock.Mock()
+        keychain = mock.Mock(storage="macOS Keychain")
         keychain.get.return_value = "synthetic-client-cookie"
 
         with (
-            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(fuxam, "credential_store", return_value=keychain),
             mock.patch.object(
                 fuxam.urllib.request, "build_opener", return_value=opener
             ),
@@ -1371,11 +1374,11 @@ class CredentialAndNetworkTests(unittest.TestCase):
             client = fuxam.FuxamClient()
             opener = mock.Mock()
             opener.open.side_effect = synthetic_session("private-user", expiry=expiry)
-            keychain = mock.Mock()
+            keychain = mock.Mock(storage="macOS Keychain")
             keychain.get.return_value = "synthetic-client-cookie"
             with (
                 self.subTest(expiry=expiry),
-                mock.patch.object(fuxam, "Keychain", return_value=keychain),
+                mock.patch.object(fuxam, "credential_store", return_value=keychain),
                 mock.patch.object(
                     fuxam.urllib.request, "build_opener", return_value=opener
                 ),
@@ -1509,10 +1512,12 @@ class CredentialAndNetworkTests(unittest.TestCase):
                         *synthetic_session(next_user, next_org),
                         FakeResponse(json.dumps(second_data).encode()),
                     ]
-                    keychain = mock.Mock()
+                    keychain = mock.Mock(storage="macOS Keychain")
                     keychain.get.return_value = "synthetic-cookie"
                     with (
-                        mock.patch.object(fuxam, "Keychain", return_value=keychain),
+                        mock.patch.object(
+                            fuxam, "credential_store", return_value=keychain
+                        ),
                         mock.patch.object(
                             fuxam.urllib.request, "build_opener", return_value=opener
                         ),
@@ -1555,10 +1560,10 @@ class CredentialAndNetworkTests(unittest.TestCase):
             *synthetic_session(),
             FakeResponse(b'{"ok":true}'),
         ]
-        keychain = mock.Mock()
+        keychain = mock.Mock(storage="macOS Keychain")
         keychain.get.return_value = "synthetic-cookie"
         with (
-            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+            mock.patch.object(fuxam, "credential_store", return_value=keychain),
             mock.patch.object(
                 fuxam.urllib.request, "build_opener", return_value=opener
             ),
@@ -3041,6 +3046,21 @@ class BookingWorkflowTests(unittest.TestCase):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_windows_cli_writes_utf8_when_output_is_redirected(self) -> None:
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        with (
+            mock.patch.object(fuxam.sys, "platform", "win32"),
+            mock.patch.object(fuxam.sys, "argv", [str(SCRIPT), "context"]),
+            mock.patch.object(fuxam.sys, "stdout", stdout),
+            mock.patch.object(fuxam.sys, "stderr", stderr),
+            mock.patch.object(fuxam, "run", return_value={"name": "Grüße ✓"}),
+        ):
+            status = fuxam.main()
+        stdout.flush()
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.buffer.getvalue()), {"name": "Grüße ✓"})
+
     def test_deep_smoke_accepts_large_catalog_with_a_single_row_probe(self) -> None:
         client = FakeSmokeClient()
         with mock.patch.object(client, "bookable", wraps=client.bookable) as bookable:
@@ -3092,23 +3112,31 @@ class DiagnosticsTests(unittest.TestCase):
                     self.assertNotIn("private-", json.dumps(result))
 
     def test_doctor_reports_credential_status_without_revealing_value(self) -> None:
-        keychain = mock.Mock()
-        keychain.get.return_value = "super-private-cookie"
-        with (
-            mock.patch.object(fuxam.sys, "platform", "darwin"),
-            mock.patch.object(fuxam, "Keychain", return_value=keychain),
+        for platform, storage in (
+            ("darwin", "macOS Keychain"),
+            ("linux", "Linux Secret Service"),
+            ("win32", "Windows Credential Manager"),
         ):
-            result = fuxam.doctor_status()
+            keychain = mock.Mock(storage=storage)
+            keychain.get.return_value = "super-private-cookie"
+            with (
+                self.subTest(platform=platform),
+                mock.patch.object(fuxam.sys, "platform", platform),
+                mock.patch.object(fuxam, "credential_store", return_value=keychain),
+            ):
+                result = fuxam.doctor_status()
 
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["credential"]["configured"])
-        self.assertNotIn("super-private-cookie", json.dumps(result))
-        keychain.get.assert_called_once_with()
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["platform"]["supported"])
+                self.assertTrue(result["credential"]["configured"])
+                self.assertEqual(result["credential"]["storage"], storage)
+                self.assertNotIn("super-private-cookie", json.dumps(result))
+                keychain.get.assert_called_once_with()
 
     def test_doctor_is_safe_on_an_unsupported_platform(self) -> None:
         with (
-            mock.patch.object(fuxam.sys, "platform", "linux"),
-            mock.patch.object(fuxam, "Keychain") as keychain,
+            mock.patch.object(fuxam.sys, "platform", "freebsd"),
+            mock.patch.object(fuxam, "credential_store") as keychain,
         ):
             result = fuxam.doctor_status()
 
@@ -3116,20 +3144,82 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIsNone(result["credential"]["configured"])
         keychain.assert_not_called()
 
-    def test_doctor_redacts_keychain_failure_details(self) -> None:
+    def test_linux_auth_status_reports_missing_or_locked_credentials(self) -> None:
         with (
-            mock.patch.object(fuxam.sys, "platform", "darwin"),
+            mock.patch.object(fuxam.sys, "platform", "linux"),
             mock.patch.object(
-                fuxam,
-                "Keychain",
-                side_effect=OSError("private-local-keychain-path"),
+                credentials.shutil, "which", return_value="/usr/bin/secret-tool"
+            ),
+            mock.patch.object(
+                credentials.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 1, b"", b"private-keyring-detail"
+                ),
             ),
         ):
-            result = fuxam.doctor_status()
+            result = fuxam.run(fuxam.build_parser().parse_args(["auth", "status"]))
+            self.assertIsNone(result["configured"])
+            self.assertEqual(result["storage"], "Linux Secret Service")
+            self.assertIn("No readable credential", result["note"])
+            self.assertNotIn("private-keyring-detail", json.dumps(result))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["keychainError"], "KEYCHAIN_CHECK_FAILED")
-        self.assertNotIn("private-local-keychain-path", json.dumps(result))
+            result = fuxam.doctor_status()
+            self.assertFalse(result["ok"])
+            self.assertIsNone(result["credential"]["configured"])
+            self.assertEqual(result["credentialError"], "CREDENTIAL_UNREADABLE")
+            self.assertNotIn("Install", result["credential"]["hint"])
+            self.assertNotIn("private-keyring-detail", json.dumps(result))
+
+    def test_doctor_redacts_credential_store_failure_details(self) -> None:
+        for platform, storage in (
+            ("darwin", "macOS Keychain"),
+            ("linux", "Linux Secret Service"),
+            ("win32", "Windows Credential Manager"),
+        ):
+            for failure in (OSError, fuxam.FuxamError, UnicodeError):
+                for stage in ("open", "read"):
+                    with (
+                        self.subTest(platform=platform, failure=failure, stage=stage),
+                        mock.patch.object(fuxam.sys, "platform", platform),
+                        mock.patch.object(fuxam, "credential_store") as factory,
+                    ):
+                        store = factory.return_value
+                        store.storage = storage
+                        operation = factory if stage == "open" else store.get
+                        operation.side_effect = failure("private-local-store-detail")
+                        result = fuxam.doctor_status()
+
+                        self.assertFalse(result["ok"])
+                        self.assertIsNone(result["credential"]["configured"])
+                        self.assertEqual(
+                            result["credential"]["storage"],
+                            None if stage == "open" else storage,
+                        )
+                        self.assertEqual(
+                            result["credentialError"],
+                            "CREDENTIAL_STORE_UNAVAILABLE"
+                            if stage == "open"
+                            else "CREDENTIAL_UNREADABLE",
+                        )
+                        self.assertEqual(
+                            "keychainError" in result, platform == "darwin"
+                        )
+                        if platform == "darwin":
+                            self.assertEqual(
+                                result["keychainError"], "KEYCHAIN_CHECK_FAILED"
+                            )
+                        hint = "Unlock your OS credential store and run auth set in a local terminal."
+                        if platform == "linux":
+                            hint = (
+                                "Install secret-tool and unlock your desktop keyring, then run auth set."
+                                if stage == "open"
+                                else "Unlock your desktop keyring or run auth set locally."
+                            )
+                        self.assertEqual(result["credential"]["hint"], hint)
+                        self.assertNotIn(
+                            "private-local-store-detail", json.dumps(result)
+                        )
 
     def test_deep_smoke_test_returns_only_shapes(self) -> None:
         result = fuxam.smoke_test(FakeSmokeClient(), deep=True)
@@ -3271,9 +3361,12 @@ class SkillMetadataTests(unittest.TestCase):
             "hmac",
             "html",
             "http",
+            "io",
             "json",
             "math",
             "re",
+            "shutil",
+            "subprocess",
             "sys",
             "time",
             "typing",

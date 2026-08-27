@@ -7,15 +7,29 @@ through `fuxam.py auth set` in an interactive terminal. If input cannot be hidde
 setup stops; pipes, arguments, and environment variables are not alternatives.
 Keep credentials out of source, logs, chat, issues, and screenshots.
 
-The cookie is stored in macOS Keychain under service `codex-fuxam-local` and
-account `__client`. Session tokens stay in process memory; Python strings cannot
-be reliably erased from memory.
+The cookie stays in the user's OS credential store:
+
+- macOS: Keychain, service `codex-fuxam-local`, account `__client`.
+- Linux: Secret Service through `secret-tool`, with the same service/account
+  attributes. Only the cookie goes over stdin; attributes and arguments are public.
+- Windows: Credential Manager, target `codex-fuxam-local/__client`. Persistence
+  is limited to the same user on this device, without roaming.
+
+There is no `.env` or plaintext fallback. Protect your OS account and keyring;
+programs running as you may access an unlocked store. Session tokens stay in
+process memory; Python strings cannot be reliably erased from memory.
+
+The Windows blob limit is [2,560 bytes](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
+Linux input is capped below [secret-tool's 8,192-byte buffer](https://github.com/GNOME/libsecret/blob/master/tool/secret-tool.c)
+to avoid truncation. Oversized credentials are rejected before storage.
 
 To remove the stored cookie:
 
 ```sh
 python3 "$HOME/.agents/skills/fuxam-local/scripts/fuxam.py" auth clear
 ```
+
+On Windows, use `py -3` and `$env:USERPROFILE` in PowerShell.
 
 If it may have leaked, also sign out of Fuxam/Clerk sessions and obtain a fresh
 cookie. Removing the local copy does not revoke a session.

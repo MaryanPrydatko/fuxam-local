@@ -18,6 +18,98 @@ SPEC.loader.exec_module(installer)
 
 
 class InstallerTests(unittest.TestCase):
+    def require_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target"
+            target.mkdir()
+            try:
+                (root / "alias").symlink_to(target, target_is_directory=True)
+            except OSError:
+                self.skipTest("Directory symlinks are unavailable for this user.")
+
+    def test_windows_install_does_not_require_symlink_privileges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            with (
+                mock.patch.object(installer.sys, "platform", "win32"),
+                mock.patch.object(
+                    pathlib.Path, "symlink_to", side_effect=OSError("no privilege")
+                ),
+            ):
+                result = installer.install(home)
+            self.assertTrue(result["ok"])
+            for relative in (installer.CANONICAL_RELATIVE, *installer.ALIAS_RELATIVES):
+                installed = home / relative
+                self.assertFalse(installed.is_symlink())
+                self.assertEqual(
+                    (installed / "scripts/fuxam_credentials.py").read_bytes(),
+                    (installer.SOURCE / "scripts/fuxam_credentials.py").read_bytes(),
+                )
+
+    def test_windows_replace_preserves_every_old_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            paths = [
+                home / relative
+                for relative in (
+                    installer.CANONICAL_RELATIVE,
+                    *installer.ALIAS_RELATIVES,
+                )
+            ]
+            with mock.patch.object(installer.sys, "platform", "win32"):
+                installer.install(home)
+                for index, path in enumerate(paths):
+                    (path / "owned-by-user").write_text(str(index))
+                result = installer.install(home, replace=True)
+            self.assertEqual(len(result["backups"]), 3)
+            self.assertEqual(
+                sorted(
+                    (pathlib.Path(path) / "owned-by-user").read_text()
+                    for path in result["backups"]
+                ),
+                ["0", "1", "2"],
+            )
+            for path in paths:
+                self.assertTrue((path / "SKILL.md").is_file())
+                self.assertFalse((path / "owned-by-user").exists())
+
+    def test_windows_partial_alias_copy_failure_restores_every_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            paths = [
+                home / relative
+                for relative in (
+                    installer.CANONICAL_RELATIVE,
+                    *installer.ALIAS_RELATIVES,
+                )
+            ]
+            for index, path in enumerate(paths):
+                path.mkdir(parents=True)
+                (path / "owned-by-user").write_text(str(index))
+            copytree = installer.shutil.copytree
+
+            def fail_last_alias(source, target, *args, **kwargs):
+                target = pathlib.Path(target)
+                if target.parent.parent.resolve() == paths[-1].parent.resolve():
+                    target.mkdir()
+                    (target / "partial").write_text("partial copy")
+                    raise OSError("synthetic copy failure")
+                return copytree(source, target, *args, **kwargs)
+
+            with (
+                mock.patch.object(installer.sys, "platform", "win32"),
+                mock.patch.object(
+                    installer.shutil, "copytree", side_effect=fail_last_alias
+                ),
+                self.assertRaisesRegex(installer.InstallError, "restored"),
+            ):
+                installer.install(home, replace=True)
+            for index, path in enumerate(paths):
+                self.assertEqual((path / "owned-by-user").read_text(), str(index))
+                self.assertEqual(len(list(path.iterdir())), 1)
+            self.assertEqual(list(home.rglob(".fuxam-local-*")), [])
+
     def test_install_copies_canonical_skill_and_creates_compatibility_aliases(
         self,
     ) -> None:
@@ -35,8 +127,11 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((canonical / "scripts/fuxam.py").is_file())
             for alias in aliases:
                 with self.subTest(alias=alias):
-                    self.assertTrue(alias.is_symlink())
-                    self.assertEqual(alias.resolve(), canonical.resolve())
+                    self.assertEqual(alias.is_symlink(), sys.platform != "win32")
+                    self.assertEqual(
+                        (alias / "SKILL.md").read_bytes(),
+                        (canonical / "SKILL.md").read_bytes(),
+                    )
 
     def test_installed_entrypoints_run_outside_the_repository(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fuxam-install-test-") as directory:
@@ -79,6 +174,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(list(home.iterdir()), [])
 
     def test_install_supports_skill_roots_symlinked_to_canonical_parent(self) -> None:
+        self.require_symlinks()
         for replace in (False, True):
             with (
                 self.subTest(replace=replace),
@@ -113,6 +209,7 @@ class InstallerTests(unittest.TestCase):
                     self.assertFalse((root / "fuxam-local").is_symlink())
 
     def test_dry_run_with_parent_aliases_preserves_every_path(self) -> None:
+        self.require_symlinks()
         with tempfile.TemporaryDirectory() as directory:
             home = pathlib.Path(directory).resolve()
             canonical = home / ".agents/skills/fuxam-local"
@@ -152,6 +249,7 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((home / ".claude").exists())
 
     def test_replace_preserves_a_shared_alias_root_conflict_once(self) -> None:
+        self.require_symlinks()
         with tempfile.TemporaryDirectory() as directory:
             home = pathlib.Path(directory).resolve()
             canonical = home / ".agents/skills/fuxam-local"
@@ -180,7 +278,10 @@ class InstallerTests(unittest.TestCase):
             )
             for alias in aliases:
                 self.assertTrue(alias.parent.is_symlink())
-                self.assertEqual(alias.resolve(), canonical)
+                self.assertEqual(
+                    (alias / "SKILL.md").read_bytes(),
+                    (canonical / "SKILL.md").read_bytes(),
+                )
 
     def test_replace_preserves_conflict_as_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -195,9 +296,10 @@ class InstallerTests(unittest.TestCase):
             backup = pathlib.Path(result["backups"][0])
             self.assertEqual((backup / "owned-by-user").read_text(), "preserve me")
             self.assertTrue((canonical / "SKILL.md").is_file())
-            self.assertTrue((home / ".claude/skills/fuxam-local").is_symlink())
+            self.assertTrue((home / ".claude/skills/fuxam-local/SKILL.md").is_file())
 
     def test_replace_preserves_distinct_leaf_symlinks_sharing_a_target(self) -> None:
+        self.require_symlinks()
         for linked_canonical in (False, True):
             with (
                 self.subTest(linked_canonical=linked_canonical),
@@ -236,7 +338,10 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual((outside / "owned-by-user").read_text(), "outside")
                 self.assertTrue((canonical / "SKILL.md").is_file())
                 for alias in aliases:
-                    self.assertEqual(alias.resolve(), canonical)
+                    self.assertEqual(
+                        (alias / "SKILL.md").read_bytes(),
+                        (canonical / "SKILL.md").read_bytes(),
+                    )
 
     def test_replace_keeps_backups_outside_discoverable_skill_directories(
         self,
@@ -250,7 +355,9 @@ class InstallerTests(unittest.TestCase):
             canonical = home / ".agents/skills/fuxam-local/SKILL.md"
             discovered = sorted((home / ".agents/skills").glob("*/SKILL.md"))
             self.assertEqual(discovered, [canonical])
-            self.assertEqual(len(result["backups"]), 1)
+            self.assertEqual(
+                len(result["backups"]), 3 if sys.platform == "win32" else 1
+            )
             backup = pathlib.Path(result["backups"][0])
             self.assertTrue((backup / "SKILL.md").is_file())
             self.assertEqual(
@@ -299,6 +406,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(discovered, [])
 
     def test_replace_migrates_shared_legacy_backups_once(self) -> None:
+        self.require_symlinks()
         for target_root, reported_root in (
             (".agents/skills", ".agents/skills"),
             ("shared-skills", ".claude/skills"),
@@ -333,6 +441,7 @@ class InstallerTests(unittest.TestCase):
                 )
 
     def test_replace_preserves_distinct_legacy_symlinks_sharing_a_target(self) -> None:
+        self.require_symlinks()
         with tempfile.TemporaryDirectory() as directory:
             home = pathlib.Path(directory).resolve()
             outside = home / "outside-skill"
@@ -378,6 +487,7 @@ class InstallerTests(unittest.TestCase):
                     "symlink_to",
                     side_effect=OSError("synthetic alias failure"),
                 ),
+                mock.patch.object(installer.sys, "platform", "darwin"),
                 self.assertRaisesRegex(installer.InstallError, "restored"),
             ):
                 installer.install(home, replace=True)
@@ -388,6 +498,7 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((home / ".codex/skills/fuxam-local").exists())
 
     def test_failed_install_restores_shared_parent_and_normal_root_paths(self) -> None:
+        self.require_symlinks()
         with tempfile.TemporaryDirectory() as directory:
             home = pathlib.Path(directory).resolve()
             canonical = home / ".agents/skills/fuxam-local"
@@ -408,6 +519,7 @@ class InstallerTests(unittest.TestCase):
                     "symlink_to",
                     side_effect=OSError("synthetic alias failure"),
                 ),
+                mock.patch.object(installer.sys, "platform", "darwin"),
                 self.assertRaisesRegex(installer.InstallError, "restored"),
             ):
                 installer.install(home, replace=True)

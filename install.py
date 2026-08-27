@@ -176,16 +176,33 @@ def install(
             staged_root.rmdir()
             staged_root = None
 
-        for alias in alias_paths:
+        for alias in unique_entries(alias_paths):
             if points_to(alias, canonical):
                 continue
             alias.parent.mkdir(parents=True, exist_ok=True)
-            alias.symlink_to(canonical, target_is_directory=True)
+            if sys.platform == "win32":
+                # Directory symlinks require extra privileges on Windows.
+                with tempfile.TemporaryDirectory(
+                    prefix=".fuxam-local-alias-", dir=alias.parent
+                ) as directory:
+                    staged_alias = pathlib.Path(directory) / "skill"
+                    shutil.copytree(
+                        canonical,
+                        staged_alias,
+                        ignore=shutil.ignore_patterns(
+                            "__pycache__", "*.pyc", ".DS_Store"
+                        ),
+                    )
+                    staged_alias.rename(alias)
+            else:
+                alias.symlink_to(canonical, target_is_directory=True)
             created_aliases.append(alias)
     except Exception as exc:
         for alias in reversed(created_aliases):
             if alias.is_symlink():
                 alias.unlink()
+            elif alias.is_dir():
+                shutil.rmtree(alias)
         if installed_canonical and canonical.is_dir():
             shutil.rmtree(canonical)
         for original, backup in reversed(backups):
