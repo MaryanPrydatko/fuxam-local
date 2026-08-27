@@ -8,9 +8,9 @@ python3 "<skill-root>/scripts/fuxam.py" smoke-test
 python3 "<skill-root>/scripts/fuxam.py" smoke-test --deep
 ```
 
-On Windows, use `py -3` instead of `python3`.
+On Windows, use `py -3` instead of `python3`. If the user selected temporary login, put `--auth env` before each command.
 
-`doctor` checks the runtime and OS credential store without contacting Fuxam. If authentication is unavailable, follow [authentication.md](authentication.md); the user unlocks the store or runs the hidden prompt locally.
+`doctor` checks the runtime and selected credential source without contacting Fuxam. It does not prove the cookie is valid. If authentication is unavailable, follow [authentication.md](authentication.md); the user configures the selected source locally. Do not switch sources automatically to make a check pass.
 
 Smoke checks are read-only and return pass/fail status and response types, not academic records. The deep check adds active-term parsing and one frontend-backed catalog page. Study-plan and catalog checks share their commands' schema validators.
 

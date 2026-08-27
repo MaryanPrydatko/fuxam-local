@@ -155,7 +155,8 @@ class SecretService:
         command = shutil.which("secret-tool")
         if not command:
             raise FuxamError(
-                "Linux requires secret-tool (libsecret) and an unlocked desktop keyring."
+                "Saved login on Linux requires secret-tool (libsecret) and an unlocked "
+                "desktop keyring. Use --auth env for explicit temporary login."
             )
         self.command = command
         self.service = service

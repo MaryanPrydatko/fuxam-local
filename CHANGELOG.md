@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add explicit temporary login through `--auth env` and `FUXAM_COOKIE`.
+- Explain missing Linux keyring dependencies during installation.
+- Add `--version` and document manual updates.
 - Add Linux Secret Service and Windows Credential Manager storage.
 - Install Windows agent copies without symlink privileges.
 - Write UTF-8 output on Windows and add cross-platform checks.

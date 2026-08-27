@@ -134,7 +134,14 @@ def install(
         "legacyBackups": [str(path) for path in legacy_backups],
         "migratedLegacyBackups": [],
         "backups": [],
+        "warnings": [],
     }
+    if sys.platform == "linux" and shutil.which("secret-tool") is None:
+        report["warnings"].append(
+            "Saved login needs secret-tool: install libsecret-tools on Debian/Ubuntu "
+            "or libsecret on Fedora/Arch, plus an unlocked Secret Service keyring. "
+            "Alternatively, use temporary login with --auth env. See the authentication guide."
+        )
     if dry_run:
         return report
 
